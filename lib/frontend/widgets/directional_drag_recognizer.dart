@@ -3,44 +3,43 @@ import 'package:flutter/gestures.dart';
 class DirectionalDragRecognizer extends HorizontalDragGestureRecognizer {
   DirectionalDragRecognizer({
     required this.direction,
-    this.minAcceptDistance = 20.0,
-    this.minAcceptVelocity,
+    this.minAcceptDistance = kTouchSlop,
     super.debugOwner,
   }) {
     onlyAcceptDragOnThreshold = true;
+    dragStartBehavior = DragStartBehavior.down;
   }
 
   final double direction;
   final double minAcceptDistance;
-  final double? minAcceptVelocity;
+  bool Function()? enabled;
 
   final Map<int, Offset> _initialPositions = {};
-  final Map<int, VelocityTracker> _velocityTrackers = {};
-  final Map<int, double> _currentDeltaX = {};
+  final Map<int, Offset> _currentDeltas = {};
+  bool _directionLocked = false;
+
+  @override
+  bool isPointerAllowed(PointerEvent event) =>
+      (enabled?.call() ?? true) && super.isPointerAllowed(event);
 
   @override
   void addAllowedPointer(PointerDownEvent event) {
     _initialPositions[event.pointer] = event.position;
-    final tracker = VelocityTracker.withKind(event.kind);
-    tracker.addPosition(event.timeStamp, event.localPosition);
-    _velocityTrackers[event.pointer] = tracker;
     super.addAllowedPointer(event);
   }
 
   @override
   void handleEvent(PointerEvent event) {
     if (event is PointerMoveEvent) {
-      _velocityTrackers[event.pointer]?.addPosition(
-        event.timeStamp,
-        event.localPosition,
-      );
       final initial = _initialPositions[event.pointer];
       if (initial != null) {
-        final dx = (event.position.dx - initial.dx) * direction;
-        _currentDeltaX[event.pointer] = dx;
-        if (dx < -kTouchSlop) {
-          stopTrackingPointer(event.pointer);
-          _cleanup(event.pointer);
+        final delta = event.position - initial;
+        _currentDeltas[event.pointer] = delta;
+        if (!_directionLocked &&
+            (delta.dx * direction < -kTouchSlop ||
+                (delta.dy.abs() > kTouchSlop &&
+                    delta.dy.abs() > delta.dx.abs()))) {
+          resolvePointer(event.pointer, GestureDisposition.rejected);
           return;
         }
       }
@@ -59,30 +58,23 @@ class DirectionalDragRecognizer extends HorizontalDragGestureRecognizer {
     )) {
       return false;
     }
-    double maxDx = 0;
-    for (final dx in _currentDeltaX.values) {
-      if (dx > maxDx) maxDx = dx;
-    }
-    if (maxDx < minAcceptDistance) return false;
-
-    final minVelocity = minAcceptVelocity;
-    if (minVelocity == null) return true;
-    for (final tracker in _velocityTrackers.values) {
-      final vx = tracker.getVelocity().pixelsPerSecond.dx * direction;
-      if (vx >= minVelocity) return true;
-    }
-    return false;
+    _directionLocked = _currentDeltas.values.any(
+      (delta) =>
+          delta.dx * direction >= minAcceptDistance &&
+          delta.dx.abs() > delta.dy.abs(),
+    );
+    return _directionLocked;
   }
 
   void _cleanup(int pointer) {
     _initialPositions.remove(pointer);
-    _velocityTrackers.remove(pointer);
-    _currentDeltaX.remove(pointer);
+    _currentDeltas.remove(pointer);
   }
 
   @override
   void didStopTrackingLastPointer(int pointer) {
     _cleanup(pointer);
+    _directionLocked = false;
     super.didStopTrackingLastPointer(pointer);
   }
 
@@ -94,8 +86,7 @@ class DirectionalDragRecognizer extends HorizontalDragGestureRecognizer {
 }
 
 class RightwardDragRecognizer extends DirectionalDragRecognizer {
-  RightwardDragRecognizer({super.debugOwner})
-    : super(direction: 1, minAcceptVelocity: 700);
+  RightwardDragRecognizer({super.debugOwner}) : super(direction: 1);
 }
 
 class LeftwardDragRecognizer extends DirectionalDragRecognizer {

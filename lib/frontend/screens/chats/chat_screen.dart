@@ -108,7 +108,7 @@ import '../../widgets/sticker_pack_sheet.dart';
 import '../../widgets/small_spinner.dart';
 import '../../widgets/swipe_to_pop.dart';
 import '../../widgets/swipe_route.dart';
-import '../../widgets/directional_drag_recognizer.dart';
+import '../../widgets/swipe_to_reply.dart';
 import '../../widgets/reload_on_reconnect.dart';
 import '../../widgets/schedule_time_picker.dart';
 import '../../widgets/chat_wallpaper_sheet.dart';
@@ -5715,6 +5715,8 @@ class _ChatScreenState extends State<ChatScreen>
                   return CustomScrollView(
                     controller: _scrollController,
                     reverse: true,
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
                     physics: _listPhysics,
                     cacheExtent: cacheExtent,
                     slivers: [
@@ -5884,8 +5886,7 @@ class _ChatScreenState extends State<ChatScreen>
                                   (chat?.type ?? widget.chatType) == 'CHANNEL';
                               final swipeable = (message.isControl || isChannel)
                                   ? pressable
-                                  : _SwipeToReply(
-                                      isMe: isMe,
+                                  : SwipeToReply(
                                       onReply: () => _startReply(message),
                                       child: pressable,
                                     );
@@ -6861,119 +6862,6 @@ class _ChatScreenState extends State<ChatScreen>
     );
     _syncUploadStatus();
     await sending;
-  }
-}
-
-class _SwipeToReply extends StatefulWidget {
-  final Widget child;
-  final bool isMe;
-  final VoidCallback onReply;
-
-  const _SwipeToReply({
-    required this.child,
-    required this.isMe,
-    required this.onReply,
-  });
-
-  @override
-  State<_SwipeToReply> createState() => _SwipeToReplyState();
-}
-
-class _SwipeToReplyState extends State<_SwipeToReply>
-    with SingleTickerProviderStateMixin {
-  static const double _maxDrag = 72.0;
-  static const double _triggerThreshold = 56.0;
-
-  late final AnimationController _springBack;
-  double _dragX = 0.0;
-  double _springFrom = 0.0;
-  bool _triggered = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _springBack =
-        AnimationController(
-          vsync: this,
-          duration: const Duration(milliseconds: 200),
-        )..addListener(() {
-          final t = Curves.easeOut.transform(_springBack.value);
-          setState(() => _dragX = _springFrom * (1 - t));
-        });
-  }
-
-  @override
-  void dispose() {
-    _springBack.dispose();
-    super.dispose();
-  }
-
-  void _onDragUpdate(DragUpdateDetails d) {
-    if (_springBack.isAnimating) _springBack.stop();
-    var next = _dragX + d.delta.dx;
-    if (next > 0) next = 0;
-    if (next < -_maxDrag) next = -_maxDrag;
-    final wasTriggered = _triggered;
-    _triggered = next <= -_triggerThreshold;
-    if (_triggered && !wasTriggered) Haptics.medium();
-    setState(() => _dragX = next);
-  }
-
-  void _onDragEnd(DragEndDetails d) {
-    if (_triggered) widget.onReply();
-    _settle();
-  }
-
-  void _onDragCancel() => _settle();
-
-  void _settle() {
-    _triggered = false;
-    _springFrom = _dragX;
-    _springBack.forward(from: 0);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    final progress = (-_dragX / _triggerThreshold).clamp(0.0, 1.0);
-    return RawGestureDetector(
-      behavior: HitTestBehavior.opaque,
-      gestures: <Type, GestureRecognizerFactory>{
-        LeftwardDragRecognizer:
-            GestureRecognizerFactoryWithHandlers<LeftwardDragRecognizer>(
-              () => LeftwardDragRecognizer(debugOwner: this),
-              (instance) {
-                instance
-                  ..onUpdate = _onDragUpdate
-                  ..onEnd = _onDragEnd
-                  ..onCancel = _onDragCancel;
-              },
-            ),
-      },
-      child: Stack(
-        alignment: Alignment.centerRight,
-        children: [
-          Positioned(
-            right: 16,
-            child: Opacity(
-              opacity: progress,
-              child: Transform.scale(
-                scale: 0.6 + 0.4 * progress,
-                child: Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: cs.surfaceContainerHighest,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(Symbols.reply, size: 20, color: cs.primary),
-                ),
-              ),
-            ),
-          ),
-          Transform.translate(offset: Offset(_dragX, 0), child: widget.child),
-        ],
-      ),
-    );
   }
 }
 

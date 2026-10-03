@@ -1,0 +1,283 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:komet/core/utils/haptics.dart';
+import 'package:komet/frontend/widgets/swipe_route.dart';
+import 'package:komet/frontend/widgets/swipe_to_reply.dart';
+
+const _backgroundKey = ValueKey('background');
+const _pageKey = ValueKey('page');
+const _messageKey = ValueKey('message');
+
+class _Harness {
+  final navigatorKey = GlobalKey<NavigatorState>();
+  final focus = FocusNode();
+  final scroll = ScrollController();
+  int replies = 0;
+
+  Future<void> pump(WidgetTester tester, {bool canPop = true}) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(platform: TargetPlatform.iOS),
+        navigatorKey: navigatorKey,
+        home: const Scaffold(body: SizedBox.expand(key: _backgroundKey)),
+      ),
+    );
+    navigatorKey.currentState!.push(
+      SwipeRoute<void>(
+        builder: (_) => PopScope(
+          canPop: canPop,
+          child: Scaffold(
+            key: _pageKey,
+            body: Column(
+              children: [
+                Expanded(
+                  child: CustomScrollView(
+                    controller: scroll,
+                    reverse: true,
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    slivers: [
+                      SliverList.builder(
+                        itemCount: 30,
+                        itemBuilder: (_, index) => SwipeToReply(
+                          onReply: () => replies++,
+                          child: SizedBox(
+                            key: index == 2 ? _messageKey : null,
+                            height: 100,
+                            width: double.infinity,
+                            child: Text('Synthetic message $index'),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                TextField(focusNode: focus),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> dispose(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    focus.dispose();
+    scroll.dispose();
+  }
+}
+
+void main() {
+  setUp(() => Haptics.enabled = false);
+  tearDown(() => Haptics.enabled = true);
+
+  testWidgets('slow back drag follows the finger and dismisses the keyboard', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await harness.pump(tester);
+    await tester.showKeyboard(find.byType(TextField));
+    expect(harness.focus.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+
+    final start = tester.getCenter(find.byKey(_messageKey));
+    final gesture = await tester.startGesture(start);
+    await gesture.moveBy(
+      const Offset(40, 0),
+      timeStamp: const Duration(milliseconds: 300),
+    );
+    await tester.pump();
+
+    expect(harness.navigatorKey.currentState!.userGestureInProgress, isTrue);
+    expect(harness.focus.hasFocus, isFalse);
+    expect(tester.testTextInput.isVisible, isFalse);
+    expect(tester.getTopLeft(find.byKey(_pageKey)).dx, closeTo(40, 0.1));
+
+    await gesture.moveBy(
+      const Offset(80, 0),
+      timeStamp: const Duration(milliseconds: 600),
+    );
+    await tester.pump();
+    final width = tester.getSize(find.byKey(_pageKey)).width;
+    expect(tester.getTopLeft(find.byKey(_pageKey)).dx, closeTo(120, 0.1));
+    expect(
+      tester.getTopLeft(find.byKey(_backgroundKey)).dx,
+      closeTo(-(width - 120) / 3, 0.1),
+    );
+
+    await gesture.up(timeStamp: const Duration(milliseconds: 1000));
+    await tester.pumpAndSettle();
+    expect(find.byKey(_pageKey), findsOneWidget);
+    expect(harness.navigatorKey.currentState!.userGestureInProgress, isFalse);
+    expect(tester.getTopLeft(find.byKey(_pageKey)).dx, 0);
+    await harness.dispose(tester);
+  });
+
+  testWidgets('a slow back drag past half the screen pops once', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await harness.pump(tester);
+    final y = tester.getCenter(find.byKey(_messageKey)).dy;
+    final gesture = await tester.startGesture(Offset(100, y));
+    for (var step = 1; step <= 11; step++) {
+      await gesture.moveBy(
+        const Offset(40, 0),
+        timeStamp: Duration(milliseconds: step * 160),
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    await gesture.up(timeStamp: const Duration(milliseconds: 2000));
+    await tester.pumpAndSettle();
+    expect(find.byKey(_pageKey), findsNothing);
+    expect(harness.navigatorKey.currentState!.userGestureInProgress, isFalse);
+    expect(harness.replies, 0);
+    await harness.dispose(tester);
+  });
+
+  testWidgets('a cancelled back gesture restores the page past halfway', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await harness.pump(tester);
+    final y = tester.getCenter(find.byKey(_messageKey)).dy;
+    final gesture = await tester.startGesture(Offset(100, y));
+    await gesture.moveBy(
+      const Offset(450, 0),
+      timeStamp: const Duration(milliseconds: 700),
+    );
+    await tester.pump();
+    await gesture.cancel();
+    await tester.pumpAndSettle();
+    expect(find.byKey(_pageKey), findsOneWidget);
+    expect(tester.getTopLeft(find.byKey(_pageKey)).dx, 0);
+    expect(harness.navigatorKey.currentState!.userGestureInProgress, isFalse);
+    await harness.dispose(tester);
+  });
+
+  testWidgets('an interrupted route releases its active back gesture', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await harness.pump(tester);
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byKey(_messageKey)),
+    );
+    await gesture.moveBy(
+      const Offset(60, 0),
+      timeStamp: const Duration(milliseconds: 200),
+    );
+    await tester.pump();
+    harness.navigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(find.byKey(_pageKey), findsNothing);
+    expect(harness.navigatorKey.currentState!.userGestureInProgress, isFalse);
+    expect(tester.takeException(), isNull);
+    await harness.dispose(tester);
+  });
+
+  testWidgets(
+    'reply uses the initial movement and leaves back navigation idle',
+    (tester) async {
+      final harness = _Harness();
+      await harness.pump(tester);
+      await tester.showKeyboard(find.byType(TextField));
+      final initialLeft = tester.getTopLeft(find.byKey(_messageKey)).dx;
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(_messageKey)),
+      );
+      await gesture.moveBy(
+        const Offset(-60, 0),
+        timeStamp: const Duration(milliseconds: 300),
+      );
+      await tester.pump();
+      expect(
+        tester.getTopLeft(find.byKey(_messageKey)).dx,
+        lessThan(initialLeft - 56),
+      );
+      expect(harness.navigatorKey.currentState!.userGestureInProgress, isFalse);
+      expect(harness.focus.hasFocus, isTrue);
+      expect(harness.replies, 0);
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(harness.replies, 1);
+      expect(tester.getTopLeft(find.byKey(_messageKey)).dx, initialLeft);
+      await harness.dispose(tester);
+    },
+  );
+
+  testWidgets('reply resistance is gradual and retracting cancels the reply', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await harness.pump(tester);
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byKey(_messageKey)),
+    );
+    await gesture.moveBy(const Offset(-100, 0));
+    await tester.pump();
+    final firstOffset = tester.getTopLeft(find.byKey(_messageKey)).dx;
+    await gesture.moveBy(const Offset(-100, 0));
+    await tester.pump();
+    final nextOffset = tester.getTopLeft(find.byKey(_messageKey)).dx;
+    expect(nextOffset, lessThan(firstOffset));
+    expect(firstOffset - nextOffset, lessThan(20));
+    await gesture.moveBy(const Offset(180, 0));
+    await tester.pump();
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(harness.replies, 0);
+    expect(tester.getTopLeft(find.byKey(_messageKey)).dx, 0);
+    await harness.dispose(tester);
+  });
+
+  testWidgets('pointer cancellation never commits a reply', (tester) async {
+    final harness = _Harness();
+    await harness.pump(tester);
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byKey(_messageKey)),
+    );
+    await gesture.moveBy(const Offset(-100, 0));
+    await tester.pump();
+    await gesture.cancel();
+    await tester.pumpAndSettle();
+    expect(harness.replies, 0);
+    expect(tester.getTopLeft(find.byKey(_messageKey)).dx, 0);
+    await harness.dispose(tester);
+  });
+
+  testWidgets(
+    'vertical scrolling dismisses focus without replying or popping',
+    (tester) async {
+      final harness = _Harness();
+      await harness.pump(tester);
+      await tester.showKeyboard(find.byType(TextField));
+      await tester.drag(find.byKey(_messageKey), const Offset(12, 100));
+      await tester.pumpAndSettle();
+      expect(harness.scroll.offset, greaterThan(0));
+      expect(harness.focus.hasFocus, isFalse);
+      expect(harness.replies, 0);
+      expect(find.byKey(_pageKey), findsOneWidget);
+      expect(harness.navigatorKey.currentState!.userGestureInProgress, isFalse);
+      await harness.dispose(tester);
+    },
+  );
+
+  testWidgets('a blocked pop does not dismiss the composer or move the page', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await harness.pump(tester, canPop: false);
+    await tester.showKeyboard(find.byType(TextField));
+    await tester.drag(find.byKey(_messageKey), const Offset(250, 0));
+    await tester.pumpAndSettle();
+    expect(harness.focus.hasFocus, isTrue);
+    expect(tester.getTopLeft(find.byKey(_pageKey)).dx, 0);
+    expect(harness.navigatorKey.currentState!.userGestureInProgress, isFalse);
+    await harness.dispose(tester);
+  });
+}

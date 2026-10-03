@@ -9,6 +9,8 @@ import '../../frontend/widgets/swipe_route.dart';
 import '../../main.dart';
 import '../../models/shared_payload.dart';
 import '../utils/logger.dart';
+import 'share_inbox.dart';
+import 'shared_file_usage.dart';
 
 class ShareIntentBridge {
   ShareIntentBridge._();
@@ -25,10 +27,16 @@ class ShareIntentBridge {
   SharedPayload? _pending;
   int _retriesLeft = 0;
   Timer? _retry;
+  late final _inbox = ShareInbox(
+    consume: () => _method.invokeMethod<dynamic>('consumeInitialShare'),
+    acknowledge: (id) =>
+        _method.invokeMethod<void>('acknowledgeShare', {'id': id}),
+    onShare: _receivePayload,
+  );
 
   bool get _native {
     try {
-      return Platform.isAndroid;
+      return Platform.isAndroid || Platform.isIOS;
     } catch (_) {
       return false;
     }
@@ -54,7 +62,11 @@ class ShareIntentBridge {
   Future<void> checkInitialShare() async {
     if (!_native) return;
     try {
-      _onEvent(await _method.invokeMethod<dynamic>('consumeInitialShare'));
+      if (Platform.isIOS) {
+        await _inbox.check();
+      } else {
+        _onEvent(await _method.invokeMethod<dynamic>('consumeInitialShare'));
+      }
     } catch (e) {
       logger.w('ShareIntentBridge.checkInitialShare: $e');
     }
@@ -70,8 +82,16 @@ class ShareIntentBridge {
   }
 
   void _onEvent(Object? event) {
+    if (Platform.isIOS) {
+      unawaited(checkInitialShare());
+      return;
+    }
     final payload = SharedPayload.fromMap(event);
     if (payload == null) return;
+    _receivePayload(payload);
+  }
+
+  void _receivePayload(SharedPayload payload) {
     logger.i(
       'Поделиться: получено ${payload.files.length} файлов'
       '${payload.text != null ? ' и текст' : ''}',
@@ -87,7 +107,10 @@ class ShareIntentBridge {
 
     final context = KometApp.navigatorKey.currentContext;
     if (!_ready || context == null || api.state != SessionState.online) {
-      if (_retriesLeft <= 0) {
+      if (Platform.isIOS && (!_ready || api.state != SessionState.online)) {
+        return;
+      }
+      if (!Platform.isIOS && _retriesLeft <= 0) {
         _pending = null;
         return;
       }
@@ -100,15 +123,32 @@ class ShareIntentBridge {
     }
 
     _pending = null;
+    _retry?.cancel();
+    _retry = null;
     _presenting = true;
     unawaited(
       pushSwipeable<void>(
         context,
         (_) => ChatListScreen(sharePayload: payload),
-      ).whenComplete(() {
-        _presenting = false;
-        unawaited(clearCache());
-      }),
+      ).whenComplete(() => _finishShare(payload)),
     );
+  }
+
+  Future<void> _finishShare(SharedPayload payload) async {
+    try {
+      await SharedFileUsage.instance.waitUntilUnused(
+        payload.files.map((file) => file.path),
+      );
+      if (Platform.isIOS) {
+        await _inbox.complete();
+      } else if (_pending == null) {
+        await clearCache();
+      }
+    } catch (e) {
+      logger.w('ShareIntentBridge.complete: $e');
+    } finally {
+      _presenting = false;
+      _flushPending();
+    }
   }
 }

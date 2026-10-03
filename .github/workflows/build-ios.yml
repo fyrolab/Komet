@@ -8,12 +8,16 @@ on:
       - master
     paths:
       - 'lib/**'
+      - 'test/**'
+      - 'scripts/pseudo_sign_ios.py'
       - 'ios/**'
       - 'pubspec.yaml'
       - '.github/workflows/build-ios.yml'
   pull_request:
     paths:
       - 'lib/**'
+      - 'test/**'
+      - 'scripts/pseudo_sign_ios.py'
       - 'ios/**'
       - 'pubspec.yaml'
       - '.github/workflows/build-ios.yml'
@@ -45,6 +49,9 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
+      - name: Verify share and swipe behavior
+        run: flutter test test/share_intent_test.dart test/share_inbox_test.dart test/shared_file_usage_test.dart test/chat_swipe_gestures_test.dart
+
       - name: Build iOS (no codesign)
         run: |
           flutter config --no-enable-swift-package-manager
@@ -69,36 +76,7 @@ jobs:
         run: brew install ldid
 
       - name: Pseudo-sign with ldid
-        run: |
-          set -euo pipefail
-          APP="build/ios/iphoneos/Runner.app"
-          ENT="$(mktemp -t ent).plist"
-          cat > "$ENT" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>get-task-allow</key><true/>
-            <key>application-identifier</key><string>ru.komet.app</string>
-            <key>keychain-access-groups</key>
-            <array><string>ru.komet.app</string></array>
-          </dict>
-          </plist>
-          PLIST
-          if [ -d "$APP/Frameworks" ]; then
-            find "$APP/Frameworks" -type f -name "*.dylib" -print0 | xargs -0 -I{} ldid -S "{}"
-            find "$APP/Frameworks" -type d -name "*.framework" | while read -r fw; do
-              bin="$fw/$(basename "$fw" .framework)"
-              [ -f "$bin" ] && ldid -S "$bin"
-            done
-          fi
-          if [ -d "$APP/PlugIns" ]; then
-            find "$APP/PlugIns" -type d -name "*.appex" | while read -r ext; do
-              bin="$ext/$(basename "$ext" .appex)"
-              [ -f "$bin" ] && ldid -S"$ENT" "$bin"
-            done
-          fi
-          ldid -S"$ENT" "$APP/Runner"
+        run: python3 scripts/pseudo_sign_ios.py build/ios/iphoneos/Runner.app
 
       - name: Package IPA
         run: |

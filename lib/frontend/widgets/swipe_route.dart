@@ -31,18 +31,35 @@ class SwipeRoute<T> extends PageRoute<T> {
   Duration get reverseTransitionDuration => const Duration(milliseconds: 400);
 
   @override
+  DelegatedTransitionBuilder? get delegatedTransition =>
+      (context, animation, secondaryAnimation, allowSnapshotting, child) =>
+          CupertinoPageTransition(
+            primaryRouteAnimation: kAlwaysCompleteAnimation,
+            secondaryRouteAnimation: secondaryAnimation,
+            linearTransition: Navigator.of(context).userGestureInProgress,
+            child: child ?? const SizedBox.shrink(),
+          );
+
+  @override
   bool canTransitionTo(TransitionRoute<dynamic> nextRoute) {
+    if (nextRoute is PageRoute && nextRoute.fullscreenDialog) return false;
     return nextRoute is SwipeRoute ||
-        nextRoute is CupertinoRouteTransitionMixin;
+        nextRoute is CupertinoRouteTransitionMixin ||
+        (nextRoute is ModalRoute && nextRoute.delegatedTransition != null);
   }
 
   @override
-  bool get popGestureInProgress => _gestureController != null;
+  bool canTransitionFrom(TransitionRoute<dynamic> previousRoute) =>
+      previousRoute is PageRoute && !fullscreenDialog;
+
+  @override
+  bool get popGestureInProgress => navigator?.userGestureInProgress ?? false;
 
   _SwipeBackController<T>? _gestureController;
 
   @override
   bool get popGestureEnabled {
+    if (fullscreenDialog || !isCurrent) return false;
     if (isFirst) return false;
     if (willHandlePopInternally) return false;
     if (popDisposition == RoutePopDisposition.doNotPop) return false;
@@ -56,6 +73,9 @@ class SwipeRoute<T> extends PageRoute<T> {
     final gesture = _SwipeBackController<T>(
       navigator: navigator!,
       controller: controller!,
+      isActive: () => isActive,
+      isCurrent: () => isCurrent,
+      canPop: () => popDisposition != RoutePopDisposition.doNotPop,
     );
     _gestureController = gesture;
     gesture._onEnd = () {
@@ -63,7 +83,14 @@ class SwipeRoute<T> extends PageRoute<T> {
         _gestureController = null;
       }
     };
+    navigator!.didStartUserGesture();
     return gesture;
+  }
+
+  @override
+  void dispose() {
+    _gestureController?.dispose();
+    super.dispose();
   }
 
   @override
@@ -134,6 +161,7 @@ class _SwipeBackGestureDetectorState<T>
     if (!widget.enabledCallback()) return;
     _width = context.size?.width ?? MediaQuery.of(context).size.width;
     if (_width <= 0) _width = 1.0;
+    FocusManager.instance.primaryFocus?.unfocus();
     _backController = widget.onStartPopGesture();
   }
 
@@ -149,38 +177,53 @@ class _SwipeBackGestureDetectorState<T>
   }
 
   void _handleCancel() {
-    _backController?.dragEnd(0.0);
+    _backController?.dragEnd(0.0, cancelled: true);
     _backController = null;
   }
 
   @override
   Widget build(BuildContext context) {
-    return RawGestureDetector(
-      behavior: HitTestBehavior.translucent,
-      gestures: <Type, GestureRecognizerFactory>{
-        RightwardDragRecognizer:
-            GestureRecognizerFactoryWithHandlers<RightwardDragRecognizer>(
-              () => RightwardDragRecognizer(debugOwner: this),
-              (instance) {
-                instance
-                  ..onStart = _handleStart
-                  ..onUpdate = _handleUpdate
-                  ..onEnd = _handleEnd
-                  ..onCancel = _handleCancel;
-              },
-            ),
-      },
-      child: widget.child,
+    return Listener(
+      onPointerCancel: (_) => _handleCancel(),
+      child: RawGestureDetector(
+        behavior: HitTestBehavior.translucent,
+        gestures: <Type, GestureRecognizerFactory>{
+          RightwardDragRecognizer:
+              GestureRecognizerFactoryWithHandlers<RightwardDragRecognizer>(
+                () => RightwardDragRecognizer(debugOwner: this),
+                (instance) {
+                  instance
+                    ..enabled = widget.enabledCallback
+                    ..onStart = _handleStart
+                    ..onUpdate = _handleUpdate
+                    ..onEnd = _handleEnd
+                    ..onCancel = _handleCancel;
+                },
+              ),
+        },
+        child: widget.child,
+      ),
     );
   }
 }
 
 class _SwipeBackController<T> {
-  _SwipeBackController({required this.navigator, required this.controller});
+  _SwipeBackController({
+    required this.navigator,
+    required this.controller,
+    required this.isActive,
+    required this.isCurrent,
+    required this.canPop,
+  });
 
   final NavigatorState navigator;
   final AnimationController controller;
+  final ValueGetter<bool> isActive;
+  final ValueGetter<bool> isCurrent;
+  final ValueGetter<bool> canPop;
   VoidCallback? _onEnd;
+  AnimationStatusListener? _statusListener;
+  bool _ended = false;
 
   static const double _kMinFlingVelocity = 1.0;
 
@@ -188,11 +231,15 @@ class _SwipeBackController<T> {
     controller.value -= delta;
   }
 
-  void dragEnd(double velocity) {
-    const animationCurve = Curves.fastLinearToSlowEaseIn;
+  void dragEnd(double velocity, {bool cancelled = false}) {
+    const animationCurve = Curves.fastEaseInToSlowEaseOut;
     final bool animateForward;
 
-    if (velocity.abs() >= _kMinFlingVelocity) {
+    if (!isCurrent()) {
+      animateForward = isActive();
+    } else if (cancelled || !canPop()) {
+      animateForward = true;
+    } else if (velocity.abs() >= _kMinFlingVelocity) {
       animateForward = velocity <= 0;
     } else {
       animateForward = controller.value > 0.5;
@@ -209,9 +256,12 @@ class _SwipeBackController<T> {
         curve: animationCurve,
       );
     } else {
-      navigator.pop();
+      if (isCurrent()) navigator.pop();
       if (controller.isAnimating) {
-        final backMs = lerpDouble(0, 800, controller.value)!.floor();
+        final backMs = math.min(
+          lerpDouble(0, 800, controller.value)!.floor(),
+          300,
+        );
         controller.animateBack(
           0.0,
           duration: Duration(milliseconds: backMs),
@@ -221,14 +271,35 @@ class _SwipeBackController<T> {
     }
 
     if (controller.isAnimating) {
-      late AnimationStatusListener statusCb;
-      statusCb = (status) {
-        _onEnd?.call();
-        controller.removeStatusListener(statusCb);
+      _statusListener = (status) {
+        if (status == AnimationStatus.completed ||
+            status == AnimationStatus.dismissed) {
+          _finish();
+        }
       };
-      controller.addStatusListener(statusCb);
+      controller.addStatusListener(_statusListener!);
     } else {
-      _onEnd?.call();
+      _finish();
     }
+  }
+
+  void _finish() {
+    if (_ended) return;
+    _ended = true;
+    final listener = _statusListener;
+    if (listener != null) controller.removeStatusListener(listener);
+    _statusListener = null;
+    _onEnd?.call();
+    if (navigator.mounted) navigator.didStopUserGesture();
+  }
+
+  void dispose() {
+    if (_ended) return;
+    _ended = true;
+    final listener = _statusListener;
+    if (listener != null) controller.removeStatusListener(listener);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (navigator.mounted) navigator.didStopUserGesture();
+    });
   }
 }
