@@ -23,7 +23,9 @@ import 'call_screen.dart';
 import '../../../core/config/app_fonts.dart';
 
 class CallsTab extends StatefulWidget {
-  const CallsTab({super.key});
+  const CallsTab({super.key, this.bottomPadding = 120});
+
+  final double bottomPadding;
 
   @override
   State<CallsTab> createState() => _CallsTabState();
@@ -547,7 +549,7 @@ class _CallsTabState extends State<CallsTab>
                     )
                   : ListView.builder(
                       physics: const BouncingScrollPhysics(),
-                      padding: const EdgeInsets.only(bottom: 120),
+                      padding: EdgeInsets.only(bottom: widget.bottomPadding),
                       itemCount: filteredCalls.length,
                       itemBuilder: (context, index) {
                         final call = filteredCalls[index];

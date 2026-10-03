@@ -2837,4 +2837,17 @@ class AppLocalizationsRu extends AppLocalizations {
 
   @override
   String get webPushStatusDevice => 'Устройство';
+
+  @override
+  String get appearanceBottomNavigationTitle => 'Нижняя панель';
+
+  @override
+  String get appearanceBottomNavigationSubtitle =>
+      'Компактная панель занимает меньше места и всегда показывает названия четырёх вкладок.';
+
+  @override
+  String get appearanceBottomNavigationFloating => 'Плавающая';
+
+  @override
+  String get appearanceBottomNavigationCompact => 'Компактная';
 }

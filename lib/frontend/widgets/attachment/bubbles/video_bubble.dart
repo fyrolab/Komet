@@ -232,8 +232,7 @@ class VideoBubble extends StatelessWidget {
     }
 
     Navigator.of(context).push(
-      MaterialPageRoute(
-        fullscreenDialog: true,
+      PhotoViewerRoute(
         builder: (_) => PhotoViewerScreen.video(
           attachment: video,
           initialVideoSources: sources,

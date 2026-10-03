@@ -49,6 +49,7 @@ import 'core/config/app_chat_chrome.dart';
 import 'core/config/app_composer_background.dart';
 import 'core/config/app_composer_style.dart';
 import 'core/config/app_nav_pill_style.dart';
+import 'core/config/app_bottom_navigation_style.dart';
 import 'core/config/app_wallpaper_tint.dart';
 import 'core/storage/chat_wallpaper_store.dart';
 import 'core/utils/wallpaper_seed.dart';
@@ -226,6 +227,7 @@ void main(List<String> args) async {
   final composerStyleFuture = AppComposerStyle.load();
   final composerBackgroundFuture = AppComposerBackground.load();
   final navPillStyleFuture = AppNavPillStyle.load();
+  final bottomNavigationStyleFuture = AppBottomNavigationStyle.load();
   final wallpaperTintFuture = AppWallpaperTint.load();
   final themeScheduleFuture = AppThemeSchedule.load();
   final messageActionsFuture = AppMessageActionsStyle.load();
@@ -288,6 +290,7 @@ void main(List<String> args) async {
     composerStyleFuture,
     composerBackgroundFuture,
     navPillStyleFuture,
+    bottomNavigationStyleFuture,
     wallpaperTintFuture,
     themeScheduleFuture,
     messageActionsFuture,

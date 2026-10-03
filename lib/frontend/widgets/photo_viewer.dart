@@ -3,6 +3,7 @@ import 'dart:collection';
 import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/symbols.dart';
@@ -46,6 +47,19 @@ class PhotoViewerActions {
       forward == null &&
       delete == null &&
       viewAllMedia == null;
+}
+
+class PhotoViewerRoute<T> extends PageRouteBuilder<T> {
+  PhotoViewerRoute({required WidgetBuilder builder})
+    : super(
+        opaque: false,
+        transitionDuration: const Duration(milliseconds: 220),
+        reverseTransitionDuration: const Duration(milliseconds: 200),
+        pageBuilder: (context, animation, secondaryAnimation) =>
+            builder(context),
+        transitionsBuilder: (context, animation, secondaryAnimation, child) =>
+            FadeTransition(opacity: animation, child: child),
+      );
 }
 
 class _ViewerMedia {
@@ -142,7 +156,8 @@ class PhotoViewerScreen extends StatefulWidget {
   State<PhotoViewerScreen> createState() => _PhotoViewerScreenState();
 }
 
-class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
+class _PhotoViewerScreenState extends State<PhotoViewerScreen>
+    with SingleTickerProviderStateMixin {
   static const int _prefetchThreshold = 3;
   static const int _maxCachedVideoPlayers = 5;
 
@@ -158,6 +173,16 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   final Map<String, Map<String, String>> _videoSourceCache = {};
   final Map<String, Future<Map<String, String>>> _videoSourceLoads = {};
   final TransformationController _heroTransform = TransformationController();
+  final Map<String, TransformationController> _photoTransforms = {};
+  final Set<int> _pointers = {};
+  late final AnimationController _dismissReturn;
+  Offset _dismissOffset = Offset.zero;
+  Offset _returnFrom = Offset.zero;
+  Offset? _pointerOrigin;
+  VelocityTracker? _velocityTracker;
+  bool _dismissAllowed = false;
+  bool _draggingToDismiss = false;
+  bool _closing = false;
   bool _feedLoaded = false;
   bool _feedFailed = false;
   bool _loadingMore = false;
@@ -169,6 +194,10 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   @override
   void initState() {
     super.initState();
+    _dismissReturn = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 240),
+    )..addListener(_animateDismissReturn);
     _heroTransform.addListener(_syncHero);
     _items = _localItems();
     _index = widget.video == null
@@ -193,11 +222,110 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   @override
   void dispose() {
     _controller.dispose();
+    _dismissReturn.dispose();
     _heroTransform.dispose();
+    for (final transform in _photoTransforms.values) {
+      transform.dispose();
+    }
     for (final session in _videoSessions.values) {
       session.dispose();
     }
     super.dispose();
+  }
+
+  TransformationController _transformFor(_ViewerMedia item) =>
+      item.id == _heroId
+      ? _heroTransform
+      : _photoTransforms.putIfAbsent(item.id, TransformationController.new);
+
+  bool get _canDismiss {
+    final route = ModalRoute.of(context);
+    return !_closing &&
+        !_dismissReturn.isAnimating &&
+        route?.isCurrent == true &&
+        route?.popDisposition != RoutePopDisposition.doNotPop &&
+        Navigator.of(context).canPop() &&
+        (!_controller.hasClients ||
+            !_controller.position.isScrollingNotifier.value) &&
+        (_current.isVideo ||
+            _transformFor(_current).value.getMaxScaleOnAxis() <= 1.01);
+  }
+
+  void _onMediaPointerDown(PointerDownEvent event) {
+    _pointers.add(event.pointer);
+    if (_pointers.length != 1) {
+      _dismissAllowed = false;
+      _restoreDismiss();
+      return;
+    }
+    _dismissAllowed = event.kind != PointerDeviceKind.mouse && _canDismiss;
+    _pointerOrigin = event.position;
+    _velocityTracker = VelocityTracker.withKind(event.kind)
+      ..addPosition(event.timeStamp, event.position);
+  }
+
+  void _onMediaPointerMove(PointerMoveEvent event) {
+    if (!_dismissAllowed || _pointers.length != 1) return;
+    _velocityTracker?.addPosition(event.timeStamp, event.position);
+    final delta = event.position - _pointerOrigin!;
+    if (!_draggingToDismiss) {
+      if (delta.distance < kTouchSlop) return;
+      if (delta.dx.abs() >= delta.dy.abs()) {
+        _dismissAllowed = false;
+        return;
+      }
+      if (!_current.isVideo &&
+          _transformFor(_current).value.getMaxScaleOnAxis() > 1.01) {
+        _dismissAllowed = false;
+        return;
+      }
+      _draggingToDismiss = true;
+    }
+    setState(() => _dismissOffset = Offset(delta.dx * 0.35, delta.dy));
+  }
+
+  void _onMediaPointerUp(PointerUpEvent event) {
+    _pointers.remove(event.pointer);
+    if (!_draggingToDismiss || !_dismissAllowed) return;
+    _dismissAllowed = false;
+    _draggingToDismiss = false;
+    _velocityTracker?.addPosition(event.timeStamp, event.position);
+    final velocity = _velocityTracker?.getVelocity().pixelsPerSecond.dy ?? 0;
+    final distance = _dismissOffset.dy;
+    final threshold = (MediaQuery.sizeOf(context).height * 0.18).clamp(96, 180);
+    final fling =
+        distance.abs() >= 32 &&
+        velocity.abs() >= 900 &&
+        velocity.sign == distance.sign;
+    final route = ModalRoute.of(context);
+    if ((distance.abs() >= threshold || fling) &&
+        route?.isCurrent == true &&
+        route?.popDisposition != RoutePopDisposition.doNotPop) {
+      _closing = true;
+      Navigator.of(context).pop();
+    } else {
+      _restoreDismiss();
+    }
+  }
+
+  void _onMediaPointerCancel(PointerCancelEvent event) {
+    _pointers.remove(event.pointer);
+    _dismissAllowed = false;
+    _restoreDismiss();
+  }
+
+  void _restoreDismiss() {
+    _draggingToDismiss = false;
+    if (_closing || _dismissOffset == Offset.zero) return;
+    _returnFrom = _dismissOffset;
+    _dismissReturn.forward(from: 0);
+  }
+
+  void _animateDismissReturn() {
+    final value = Curves.easeOutCubic.transform(_dismissReturn.value);
+    setState(
+      () => _dismissOffset = Offset.lerp(_returnFrom, Offset.zero, value)!,
+    );
   }
 
   List<_ViewerMedia> _localItems() {
@@ -673,9 +801,12 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
   Widget build(BuildContext context) {
     final padding = MediaQuery.of(context).padding;
     final hasMenu = _current.isVideo || !(widget.actions?.isEmpty ?? true);
+    final dismissProgress =
+        (_dismissOffset.dy.abs() / (MediaQuery.sizeOf(context).height * 0.55))
+            .clamp(0.0, 1.0);
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Colors.black.withValues(alpha: 1 - dismissProgress),
       body: CallbackShortcuts(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.arrowLeft): () => _step(1),
@@ -686,71 +817,91 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
           child: Stack(
             children: [
               Positioned.fill(
-                child: PageView.builder(
-                  key: ValueKey(_pager),
-                  controller: _controller,
-                  reverse: true,
-                  itemCount: _items.length,
-                  onPageChanged: _onPageChanged,
-                  itemBuilder: (_, i) => _buildPage(i),
+                child: Listener(
+                  behavior: HitTestBehavior.translucent,
+                  onPointerDown: _onMediaPointerDown,
+                  onPointerMove: _onMediaPointerMove,
+                  onPointerUp: _onMediaPointerUp,
+                  onPointerCancel: _onMediaPointerCancel,
+                  child: Transform.translate(
+                    key: const ValueKey('media-dismiss-transform'),
+                    offset: _dismissOffset,
+                    child: Transform.scale(
+                      scale: 1 - 0.12 * dismissProgress,
+                      child: PageView.builder(
+                        key: ValueKey(_pager),
+                        controller: _controller,
+                        reverse: true,
+                        itemCount: _items.length,
+                        onPageChanged: _onPageChanged,
+                        itemBuilder: (_, i) => _buildPage(i),
+                      ),
+                    ),
+                  ),
                 ),
               ),
               Positioned.fill(
                 child: IgnorePointer(
-                  ignoring: !_chromeVisible,
+                  ignoring: !_chromeVisible || _dismissOffset != Offset.zero,
                   child: AnimatedOpacity(
                     opacity: _chromeVisible ? 1 : 0,
                     duration: const Duration(milliseconds: 220),
                     curve: Curves.easeOut,
-                    child: Stack(
-                      children: [
-                        if (_index < _items.length - 1)
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: _arrow(Symbols.chevron_left, () => _step(1)),
-                          ),
-                        if (_index > 0)
-                          Align(
-                            alignment: Alignment.centerRight,
-                            child: _arrow(
-                              Symbols.chevron_right,
-                              () => _step(-1),
+                    child: Opacity(
+                      opacity: 1 - dismissProgress,
+                      child: Stack(
+                        children: [
+                          if (_index < _items.length - 1)
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: _arrow(
+                                Symbols.chevron_left,
+                                () => _step(1),
+                              ),
+                            ),
+                          if (_index > 0)
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: _arrow(
+                                Symbols.chevron_right,
+                                () => _step(-1),
+                              ),
+                            ),
+                          Positioned(
+                            top: padding.top + 8,
+                            left: 8,
+                            right: 8,
+                            child: Row(
+                              children: [
+                                IconButton(
+                                  icon: const Icon(
+                                    Symbols.close,
+                                    color: Colors.white,
+                                  ),
+                                  onPressed: () => Navigator.of(context).pop(),
+                                ),
+                                const Spacer(),
+                                if (hasMenu)
+                                  Builder(
+                                    builder: (btnContext) => IconButton(
+                                      icon: const Icon(
+                                        Symbols.more_vert,
+                                        color: Colors.white,
+                                      ),
+                                      onPressed: () => _openMenu(btnContext),
+                                    ),
+                                  ),
+                              ],
                             ),
                           ),
-                        Positioned(
-                          top: padding.top + 8,
-                          left: 8,
-                          right: 8,
-                          child: Row(
-                            children: [
-                              IconButton(
-                                icon: const Icon(
-                                  Symbols.close,
-                                  color: Colors.white,
-                                ),
-                                onPressed: () => Navigator.of(context).pop(),
-                              ),
-                              const Spacer(),
-                              if (hasMenu)
-                                Builder(
-                                  builder: (btnContext) => IconButton(
-                                    icon: const Icon(
-                                      Symbols.more_vert,
-                                      color: Colors.white,
-                                    ),
-                                    onPressed: () => _openMenu(btnContext),
-                                  ),
-                                ),
-                            ],
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: _buildBottomBar(padding.bottom),
                           ),
-                        ),
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          child: _buildBottomBar(padding.bottom),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -781,7 +932,7 @@ class _PhotoViewerScreenState extends State<PhotoViewerScreen> {
       child: InteractiveViewer(
         minScale: 1,
         maxScale: 5,
-        transformationController: isHero ? _heroTransform : null,
+        transformationController: _transformFor(item),
         child: Center(
           child: RotatedBox(
             quarterTurns: _quarterTurns[item.id] ?? 0,

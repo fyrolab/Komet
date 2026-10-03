@@ -20,20 +20,41 @@ import '../../photo_viewer.dart';
 import '../../upload_progress_ring.dart';
 import 'bubble_context.dart';
 
-class FileBubble extends StatelessWidget {
-  static const double _previewWidth = 240;
-  static const double _previewHeight = 160;
+typedef FileBubbleOpener =
+    Future<FileDownloadResult> Function(
+      String cacheName,
+      Future<String?> Function() resolveUrl, {
+      void Function(double progress)? onProgress,
+      void Function()? onReady,
+      DownloadMetadata? download,
+    });
 
+class FileBubble extends StatefulWidget {
   final BubbleContext ctx;
   final FileAttachment file;
   final bool fill;
+  final FileBubbleOpener openFile;
 
   const FileBubble({
     super.key,
     required this.ctx,
     required this.file,
     this.fill = false,
+    this.openFile = openCachedFile,
   });
+
+  @override
+  State<FileBubble> createState() => _FileBubbleState();
+}
+
+class _FileBubbleState extends State<FileBubble> {
+  static const double _previewWidth = 240;
+  static const double _previewHeight = 160;
+
+  bool _opening = false;
+
+  BubbleContext get ctx => widget.ctx;
+  FileAttachment get file => widget.file;
 
   @override
   Widget build(BuildContext context) {
@@ -52,143 +73,174 @@ class FileBubble extends StatelessWidget {
       encrypted: fileId != null && _isEncryptedImage(name),
     );
 
-    final inner = Padding(
-      padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ?previewWidget,
-          Row(
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        MediaCache.presence(cacheName),
+        MediaDownloadProgress.notifier(cacheName),
+      ]),
+      builder: (context, _) {
+        final cached = MediaCache.presence(cacheName).value;
+        final progress = MediaDownloadProgress.notifier(cacheName).value;
+        final busy = _opening || progress != null;
+        final available = fileId != null && ctx.uploadProgress == null;
+        final status = progress != null
+            ? 'Загрузка ${(progress * 100).round()}%'
+            : _opening
+            ? 'Открытие…'
+            : cached
+            ? 'Открыть'
+            : available
+            ? 'Скачать'
+            : ctx.uploadProgress != null
+            ? 'Отправка…'
+            : 'Файл недоступен';
+        final inner = Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              Container(
-                width: 38,
-                height: 38,
-                decoration: BoxDecoration(
-                  color: isMe ? ctx.systemTint : ctx.cs.primaryContainer,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: ctx.uploadProgress == null
-                    ? Icon(
-                        Symbols.description,
+              ?previewWidget,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: isMe ? ctx.systemTint : ctx.cs.primaryContainer,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: ctx.uploadProgress == null
+                        ? Icon(
+                            Symbols.description,
+                            color: isMe
+                                ? ctx.cs.onPrimaryContainer
+                                : ctx.cs.primary,
+                            size: 20,
+                          )
+                        : UploadProgressRing(
+                            progress: ctx.uploadProgress!,
+                            color: isMe
+                                ? ctx.cs.onPrimaryContainer
+                                : ctx.cs.primary,
+                            size: 38,
+                            strokeWidth: 2.4,
+                            iconSize: 14,
+                            padding: const EdgeInsets.all(4),
+                          ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          name,
+                          style: TextStyle(
+                            color: ctx.text,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            height: 1.2,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '$status · $sizeStr',
+                          style: TextStyle(
+                            color: ctx.dim,
+                            fontSize: 12,
+                            height: 1.2,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  if (available)
+                    Container(
+                      width: 34,
+                      height: 34,
+                      decoration: BoxDecoration(
                         color: isMe
-                            ? ctx.cs.onPrimaryContainer
-                            : ctx.cs.primary,
-                        size: 20,
-                      )
-                    : UploadProgressRing(
-                        progress: ctx.uploadProgress!,
-                        color: isMe
-                            ? ctx.cs.onPrimaryContainer
-                            : ctx.cs.primary,
-                        size: 38,
-                        strokeWidth: 2.4,
-                        iconSize: 14,
-                        padding: const EdgeInsets.all(4),
+                            ? ctx.systemTint
+                            : ctx.cs.surfaceContainerHighest,
+                        shape: BoxShape.circle,
                       ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      name,
-                      style: TextStyle(
-                        color: ctx.text,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        height: 1.2,
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+                      child: busy
+                          ? Padding(
+                              padding: const EdgeInsets.all(8),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                value: progress != null && progress > 0
+                                    ? progress
+                                    : null,
+                                color: isMe
+                                    ? ctx.cs.onPrimaryContainer
+                                    : ctx.cs.primary,
+                              ),
+                            )
+                          : Icon(
+                              cached ? Symbols.open_in_new : Symbols.download,
+                              color: isMe
+                                  ? ctx.cs.onPrimaryContainer
+                                  : ctx.cs.primary,
+                              size: 18,
+                            ),
                     ),
-                    const SizedBox(height: 2),
-                    ValueListenableBuilder<double?>(
-                      valueListenable: MediaDownloadProgress.notifier(
-                        cacheName,
-                      ),
-                      builder: (context, progress, _) => Text(
-                        progress != null
-                            ? '${(progress * 100).round()}% · $sizeStr'
-                            : sizeStr,
-                        style: TextStyle(
-                          color: ctx.dim,
-                          fontSize: 12,
-                          height: 1.2,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+                ],
               ),
-              const SizedBox(width: 12),
-              ValueListenableBuilder<double?>(
-                valueListenable: MediaDownloadProgress.notifier(cacheName),
-                builder: (context, progress, _) {
-                  final iconColor = isMe
-                      ? ctx.cs.onPrimaryContainer
-                      : ctx.cs.primary;
-                  Widget circle(Widget child, VoidCallback? onTap) {
-                    return GestureDetector(
-                      onTap: onTap,
-                      child: Container(
-                        width: 34,
-                        height: 34,
-                        decoration: BoxDecoration(
-                          color: isMe
-                              ? ctx.systemTint
-                              : ctx.cs.surfaceContainerHighest,
-                          shape: BoxShape.circle,
-                        ),
-                        child: child,
-                      ),
-                    );
-                  }
-
-                  if (progress != null) {
-                    return circle(
-                      Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          value: progress > 0 ? progress : null,
-                          color: iconColor,
-                        ),
-                      ),
-                      null,
-                    );
-                  }
-
-                  return ValueListenableBuilder<bool>(
-                    valueListenable: MediaCache.presence(cacheName),
-                    builder: (context, cached, _) => circle(
-                      Icon(
-                        cached ? Symbols.check : Symbols.download,
-                        color: iconColor,
-                        size: 18,
-                      ),
-                      () => _downloadFile(ctx.context, file, name),
-                    ),
-                  );
-                },
-              ),
+              ctx.meta(),
             ],
           ),
-          ctx.meta(),
-        ],
-      ),
+        );
+        final body = widget.fill ? inner : IntrinsicWidth(child: inner);
+        final onTap = available ? () => _activate(name, cacheName) : null;
+        return Semantics(
+          button: true,
+          enabled: available && !busy,
+          label: name,
+          value: '$status · $sizeStr',
+          hint: available && !busy
+              ? cached
+                    ? 'Открыть файл'
+                    : 'Скачать и открыть файл'
+              : null,
+          onTap: busy ? null : onTap,
+          excludeSemantics: true,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            excludeFromSemantics: true,
+            onTap: onTap,
+            child: body,
+          ),
+        );
+      },
     );
-    final body = fill ? inner : IntrinsicWidth(child: inner);
-    if (!_isViewableImage(name)) return body;
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => _openInViewer(ctx.context, name, cacheName),
-      child: body,
-    );
+  }
+
+  Future<void> _activate(String name, String cacheName) async {
+    if (_opening || MediaDownloadProgress.notifier(cacheName).value != null) {
+      return;
+    }
+    setState(() => _opening = true);
+    try {
+      if (_isViewableImage(name)) {
+        await _openInViewer(context, name, cacheName);
+      } else {
+        await _downloadFile(context, file, name);
+      }
+    } catch (_) {
+      if (mounted) {
+        showCustomNotification(context, 'Не удалось открыть файл');
+      }
+    } finally {
+      if (mounted) setState(() => _opening = false);
+    }
   }
 
   static bool _isViewableImage(String name) =>
@@ -313,17 +365,19 @@ class FileBubble extends StatelessWidget {
     if (fileId == null) return;
     Haptics.tap();
 
-    final wasCached = (await MediaCache.existing(cacheName)) != null;
+    File? local = await MediaCache.existing(cacheName);
+    final wasCached = local != null;
     if (!wasCached) MediaDownloadProgress.set(cacheName, 0);
-    File? local;
     try {
-      final url = await _fileUrl();
-      if (url != null && url.isNotEmpty) {
-        local = await MediaCache.getOrDownload(
-          cacheName,
-          url,
-          onProgress: (p) => MediaDownloadProgress.set(cacheName, p),
-        );
+      if (local == null) {
+        final url = await _fileUrl();
+        if (url != null && url.isNotEmpty) {
+          local = await MediaCache.getOrDownload(
+            cacheName,
+            url,
+            onProgress: (p) => MediaDownloadProgress.set(cacheName, p),
+          );
+        }
       }
     } finally {
       if (!wasCached) MediaDownloadProgress.set(cacheName, null);
@@ -361,7 +415,7 @@ class FileBubble extends StatelessWidget {
     if (!context.mounted || shown == null) return;
 
     await Navigator.of(context).push(
-      MaterialPageRoute(
+      PhotoViewerRoute(
         builder: (_) => PhotoViewerScreen(
           photos: [PhotoAttachment(localPath: shown.path)],
           chatId: ctx.message.chatId,
@@ -416,36 +470,36 @@ class FileBubble extends StatelessWidget {
     Haptics.tap();
 
     final cacheName = '${fileId}_$name';
-    final cached = (await MediaCache.existing(cacheName)) != null;
+    final cached = MediaCache.presence(cacheName).value;
     final kind = downloadKindForName(name);
 
     if (!cached) MediaDownloadProgress.set(cacheName, 0);
-    final result = await openCachedFile(
-      cacheName,
-      () => messagesModule.getFileUrl(
-        messageId: ctx.message.id,
-        chatId: ctx.message.chatId,
-        fileId: fileId,
-      ),
-      onProgress: (p) => MediaDownloadProgress.set(cacheName, p),
-      onReady: () {
-        if (!cached) MediaDownloadProgress.set(cacheName, null);
-      },
-      download: DownloadMetadata(
-        cacheName: cacheName,
-        name: kind == DownloadKind.file ? name : '',
-        kind: kind,
-        sourceName: ctx.chatName ?? '',
-        thumbnailUrl:
-            file.preview?.baseUrl ??
-            file.preview?.previewData ??
-            file.previewData,
-        expectedSize: file.size ?? 0,
-        chatId: ctx.message.chatId,
-        messageId: ctx.message.id,
-        messageTime: ctx.message.time,
-      ),
-    );
+    final result = await widget
+        .openFile(
+          cacheName,
+          () => messagesModule.getFileUrl(
+            messageId: ctx.message.id,
+            chatId: ctx.message.chatId,
+            fileId: fileId,
+          ),
+          onProgress: (p) => MediaDownloadProgress.set(cacheName, p),
+          onReady: () => MediaDownloadProgress.set(cacheName, null),
+          download: DownloadMetadata(
+            cacheName: cacheName,
+            name: kind == DownloadKind.file ? name : '',
+            kind: kind,
+            sourceName: ctx.chatName ?? '',
+            thumbnailUrl:
+                file.preview?.baseUrl ??
+                file.preview?.previewData ??
+                file.previewData,
+            expectedSize: file.size ?? 0,
+            chatId: ctx.message.chatId,
+            messageId: ctx.message.id,
+            messageTime: ctx.message.time,
+          ),
+        )
+        .whenComplete(() => MediaDownloadProgress.set(cacheName, null));
     if (!context.mounted) return;
     if (!result.ok) {
       showCustomNotification(

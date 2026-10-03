@@ -809,11 +809,37 @@ class _MediaTile extends StatelessWidget {
         showCustomNotification(context, 'Не удалось загрузить видео');
         return;
       }
-      pushSwipeable(
-        context,
-        (_) => PhotoViewerScreen.video(
-          attachment: att,
-          initialVideoSources: sources,
+      Navigator.of(context).push(
+        PhotoViewerRoute(
+          builder: (_) => PhotoViewerScreen.video(
+            attachment: att,
+            initialVideoSources: sources,
+            chatId: item.chatId,
+            message: CachedMessage(
+              id: item.messageId,
+              accountId: 0,
+              chatId: item.chatId,
+              senderId: item.senderId,
+              text: item.text,
+              time: item.time,
+            ),
+            actions: PhotoViewerActions(goToMessage: onGoToMessage),
+            sourceName: sourceName,
+          ),
+        ),
+      );
+      return;
+    }
+    final url = att.baseUrl ?? att.previewData ?? '';
+    if (url.isEmpty) return;
+
+    final photo = att is PhotoAttachment && (att.baseUrl ?? '').isNotEmpty
+        ? att
+        : PhotoAttachment(baseUrl: url);
+    Navigator.of(context).push(
+      PhotoViewerRoute(
+        builder: (_) => PhotoViewerScreen(
+          photos: [photo],
           chatId: item.chatId,
           message: CachedMessage(
             id: item.messageId,
@@ -826,30 +852,6 @@ class _MediaTile extends StatelessWidget {
           actions: PhotoViewerActions(goToMessage: onGoToMessage),
           sourceName: sourceName,
         ),
-      );
-      return;
-    }
-    final url = att.baseUrl ?? att.previewData ?? '';
-    if (url.isEmpty) return;
-
-    final photo = att is PhotoAttachment && (att.baseUrl ?? '').isNotEmpty
-        ? att
-        : PhotoAttachment(baseUrl: url);
-    pushSwipeable(
-      context,
-      (_) => PhotoViewerScreen(
-        photos: [photo],
-        chatId: item.chatId,
-        message: CachedMessage(
-          id: item.messageId,
-          accountId: 0,
-          chatId: item.chatId,
-          senderId: item.senderId,
-          text: item.text,
-          time: item.time,
-        ),
-        actions: PhotoViewerActions(goToMessage: onGoToMessage),
-        sourceName: sourceName,
       ),
     );
   }

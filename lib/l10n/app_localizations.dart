@@ -5353,6 +5353,30 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Device'**
   String get webPushStatusDevice;
+
+  /// No description provided for @appearanceBottomNavigationTitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Bottom navigation'**
+  String get appearanceBottomNavigationTitle;
+
+  /// No description provided for @appearanceBottomNavigationSubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'The compact bar keeps all four tab labels visible and takes up less space.'**
+  String get appearanceBottomNavigationSubtitle;
+
+  /// No description provided for @appearanceBottomNavigationFloating.
+  ///
+  /// In en, this message translates to:
+  /// **'Floating'**
+  String get appearanceBottomNavigationFloating;
+
+  /// No description provided for @appearanceBottomNavigationCompact.
+  ///
+  /// In en, this message translates to:
+  /// **'Compact'**
+  String get appearanceBottomNavigationCompact;
 }
 
 class _AppLocalizationsDelegate

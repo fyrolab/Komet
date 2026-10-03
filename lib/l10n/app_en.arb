@@ -1215,5 +1215,9 @@
   "webPushStatusService": "Service",
   "webPushStatusToken": "Token",
   "webPushStatusLinkedAt": "Linked",
-  "webPushStatusDevice": "Device"
+  "webPushStatusDevice": "Device",
+  "appearanceBottomNavigationTitle": "Bottom navigation",
+  "appearanceBottomNavigationSubtitle": "The compact bar keeps all four tab labels visible and takes up less space.",
+  "appearanceBottomNavigationFloating": "Floating",
+  "appearanceBottomNavigationCompact": "Compact"
 }

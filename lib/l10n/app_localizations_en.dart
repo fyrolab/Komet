@@ -2825,4 +2825,17 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get webPushStatusDevice => 'Device';
+
+  @override
+  String get appearanceBottomNavigationTitle => 'Bottom navigation';
+
+  @override
+  String get appearanceBottomNavigationSubtitle =>
+      'The compact bar keeps all four tab labels visible and takes up less space.';
+
+  @override
+  String get appearanceBottomNavigationFloating => 'Floating';
+
+  @override
+  String get appearanceBottomNavigationCompact => 'Compact';
 }

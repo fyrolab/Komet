@@ -26,7 +26,9 @@ import '../../../core/config/app_shape.dart';
 enum _SearchMode { phone, id }
 
 class ContactsTab extends StatefulWidget {
-  const ContactsTab({super.key});
+  const ContactsTab({super.key, this.bottomPadding = 120});
+
+  final double bottomPadding;
 
   @override
   State<ContactsTab> createState() => _ContactsTabState();
@@ -276,7 +278,7 @@ class _ContactsTabState extends State<ContactsTab> with SpectrumSurface {
                     )
                   : ListView.builder(
                       physics: const BouncingScrollPhysics(),
-                      padding: const EdgeInsets.only(bottom: 120),
+                      padding: EdgeInsets.only(bottom: widget.bottomPadding),
                       itemCount: _contacts.length,
                       itemBuilder: (context, index) {
                         final contact = _contacts[index];

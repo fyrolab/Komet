@@ -23,6 +23,8 @@ import '../../widgets/glossy_pill.dart';
 import '../../widgets/sheet_helpers.dart';
 import '../../widgets/swipe_route.dart';
 import '../../widgets/sliding_pill_nav.dart';
+import '../../widgets/compact_bottom_navigation_bar.dart';
+import '../../widgets/main_navigation_items.dart';
 import '../../widgets/springy_tap.dart';
 import '../../widgets/informer_banner_tile.dart';
 import '../../../backend/modules/share_sender.dart';
@@ -53,10 +55,10 @@ import '../../../backend/api.dart';
 import '../../../core/protocol/opcode_map.dart';
 import '../../../core/protocol/packet.dart';
 import '../../../core/utils/haptics.dart';
-import '../../../core/config/app_animations.dart';
 import '../../../core/config/app_frost.dart';
 import '../../../core/config/app_spectrum_background.dart';
 import '../../../core/config/app_nav_pill_style.dart';
+import '../../../core/config/app_bottom_navigation_style.dart';
 import '../../../core/cache/info_cache.dart';
 import '../../../core/config/app_visual_style.dart';
 import '../../../core/config/app_stories.dart';
@@ -219,18 +221,6 @@ class _ChatListScreenState extends State<ChatListScreen>
   Set<int> _contactIds = <int>{};
 
   int _currentNavIndex = 0;
-
-  static const List<PillNavItem> _chatsNavItems = [
-    PillNavItem(icon: Symbols.chat_bubble, label: 'Чаты'),
-    PillNavItem(icon: Symbols.call, label: 'Звонки'),
-    PillNavItem(icon: Symbols.person_pin, label: 'Контакты'),
-    PillNavItem(
-      icon: Symbols.settings,
-      label: 'Настройки',
-      longPressable: true,
-      animationAsset: AppAnimations.settings,
-    ),
-  ];
 
   double _navPageAnimStart = 0;
   double _navPageAnimEnd = 0;
@@ -2148,10 +2138,23 @@ class _ChatListScreenState extends State<ChatListScreen>
                 },
               ),
             ),
-          SliverPadding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.viewPaddingOf(context).bottom + 100,
-            ),
+          ValueListenableBuilder<BottomNavigationStyle>(
+            valueListenable: AppBottomNavigationStyle.current,
+            builder: (context, style, _) {
+              final compact = style == BottomNavigationStyle.compact;
+              final keyboardVisible =
+                  MediaQuery.viewInsetsOf(context).bottom > 0;
+              final bottom = compact && keyboardVisible
+                  ? 12.0
+                  : MediaQuery.viewPaddingOf(context).bottom +
+                        (compact
+                            ? CompactBottomNavigationBar.contentHeight(
+                                    context,
+                                  ) +
+                                  12
+                            : 100);
+              return SliverPadding(padding: EdgeInsets.only(bottom: bottom));
+            },
           ),
         ],
       ),
@@ -2296,7 +2299,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                         inactiveWidth
                   : _currentNavIndex.toDouble();
               return SlidingPillNav(
-                items: _chatsNavItems,
+                items: mainNavigationItems,
                 position: position,
                 animationDuration: _navDragging
                     ? Duration.zero
@@ -2323,6 +2326,13 @@ class _ChatListScreenState extends State<ChatListScreen>
     if (widget.archiveMode) {
       return _buildArchiveScaffold(cs);
     }
+    return ValueListenableBuilder<BottomNavigationStyle>(
+      valueListenable: AppBottomNavigationStyle.current,
+      builder: (context, style, _) => _buildMainScaffold(cs, style),
+    );
+  }
+
+  Widget _buildMainScaffold(ColorScheme cs, BottomNavigationStyle navStyle) {
     return Scaffold(
       backgroundColor: cs.surface,
       body: SafeArea(
@@ -2341,6 +2351,16 @@ class _ChatListScreenState extends State<ChatListScreen>
               );
             }
             final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
+            final compactNav = navStyle == BottomNavigationStyle.compact;
+            final keyboardVisible = MediaQuery.viewInsetsOf(context).bottom > 0;
+            final compactHeight = CompactBottomNavigationBar.contentHeight(
+              context,
+            );
+            final contentBottomPadding = compactNav
+                ? (keyboardVisible ? 12.0 : bottomInset + compactHeight + 12)
+                : 120.0;
+            final fabBottom =
+                bottomInset + (compactNav ? compactHeight + 12 : 90);
             final pageW = constraints.maxWidth;
             final pageH = constraints.maxHeight;
             final navInnerW = pageW - 20;
@@ -2410,21 +2430,27 @@ class _ChatListScreenState extends State<ChatListScreen>
                                 child: SizedBox(
                                   width: pageW,
                                   height: pageH,
-                                  child: const CallsTab(),
+                                  child: CallsTab(
+                                    bottomPadding: contentBottomPadding,
+                                  ),
                                 ),
                               ),
                               RepaintBoundary(
                                 child: SizedBox(
                                   width: pageW,
                                   height: pageH,
-                                  child: const ContactsTab(),
+                                  child: ContactsTab(
+                                    bottomPadding: contentBottomPadding,
+                                  ),
                                 ),
                               ),
                               RepaintBoundary(
                                 child: SizedBox(
                                   width: pageW,
                                   height: pageH,
-                                  child: const SettingsTab(),
+                                  child: SettingsTab(
+                                    bottomPadding: contentBottomPadding,
+                                  ),
                                 ),
                               ),
                             ],
@@ -2444,7 +2470,23 @@ class _ChatListScreenState extends State<ChatListScreen>
                     ),
                   ),
                 ),
-                _buildDockedBottomNav(cs, navInnerW, bottomInset),
+                if (compactNav) ...[
+                  if (!_isSelectionMode)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: CompactBottomNavigationBar(
+                        items: mainNavigationItems,
+                        currentIndex: _currentNavIndex,
+                        onTap: _onNavTabSelected,
+                        onItemLongPress: (index, position) {
+                          if (index == 3) _openAccountSwitcher(position);
+                        },
+                      ),
+                    ),
+                ] else
+                  _buildDockedBottomNav(cs, navInnerW, bottomInset),
                 AnimatedBuilder(
                   animation: Listenable.merge([
                     _fabController,
@@ -2457,6 +2499,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                     );
                     final showChatsFab =
                         !_isSelectionMode &&
+                        !(compactNav && keyboardVisible) &&
                         (_navDragging || _navPageAnimController.isAnimating
                             ? pageDisplayT < 1.0
                             : _currentNavIndex == 0);
@@ -2482,7 +2525,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                           if (_fabController.value > 0)
                             Positioned(
                               right: 20,
-                              bottom: bottomInset + 90 + 74,
+                              bottom: fabBottom + 74,
                               child: RepaintBoundary(
                                 child: Transform.scale(
                                   scale: val,
@@ -2496,7 +2539,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                             ),
                           Positioned(
                             right: 20,
-                            bottom: bottomInset + 90,
+                            bottom: fabBottom,
                             child: ValueListenableBuilder<VisualStyle>(
                               valueListenable: AppVisualStyle.current,
                               builder: (context, style, child) =>

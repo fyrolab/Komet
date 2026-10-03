@@ -51,7 +51,9 @@ import '../../../core/config/app_fonts.dart';
 import '../../../core/config/app_shape.dart';
 
 class SettingsTab extends StatefulWidget {
-  const SettingsTab({super.key});
+  const SettingsTab({super.key, this.bottomPadding = 120});
+
+  final double bottomPadding;
 
   @override
   State<SettingsTab> createState() => _SettingsTabState();
@@ -672,7 +674,9 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                       ),
                     ),
                   ),
-                const SliverToBoxAdapter(child: SizedBox(height: 120)),
+                SliverToBoxAdapter(
+                  child: SizedBox(height: widget.bottomPadding),
+                ),
               ],
             ),
           ),

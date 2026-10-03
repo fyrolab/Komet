@@ -41,6 +41,7 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: 'stable'
+          cache: true
 
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
@@ -55,13 +56,38 @@ jobs:
           swiftc -suppress-warnings ios/Shared/KometShareStore.swift test/native/ios_share_store_test.swift -o /tmp/ios-share-store-tests
           /tmp/ios-share-store-tests
 
-      - name: Verify share and swipe behavior
-        run: flutter test test/share_intent_test.dart test/share_inbox_test.dart test/shared_file_usage_test.dart test/chat_swipe_gestures_test.dart
+      - name: Analyze application
+        run: flutter analyze lib test --no-pub --no-fatal-infos
+
+      - name: Verify sharing and chat interactions
+        run: >-
+          flutter test --no-pub
+          test/share_intent_test.dart
+          test/share_inbox_test.dart
+          test/shared_file_usage_test.dart
+          test/chat_swipe_gestures_test.dart
+          test/bottom_navigation_style_test.dart
+          test/file_bubble_test.dart
+          test/photo_viewer_test.dart
+          test/photo_hero_test.dart
+          test/media_viewer_video_test.dart
+          test/share_composer_bar_test.dart
 
       - name: Build iOS (no codesign)
         run: |
           flutter config --no-enable-swift-package-manager
-          flutter build ios --release --no-codesign
+          flutter build ios --release --no-codesign -v > ios-build.log 2>&1 || {
+            tail -n 180 ios-build.log
+            exit 1
+          }
+
+      - name: Upload build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-diagnostics
+          path: ios-build.log
+          retention-days: 7
 
       - name: Package unsigned IPA
         run: |

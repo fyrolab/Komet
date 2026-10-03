@@ -959,5 +959,9 @@
   "webPushStatusService": "Сервис",
   "webPushStatusToken": "Токен",
   "webPushStatusLinkedAt": "Привязан",
-  "webPushStatusDevice": "Устройство"
+  "webPushStatusDevice": "Устройство",
+  "appearanceBottomNavigationTitle": "Нижняя панель",
+  "appearanceBottomNavigationSubtitle": "Компактная панель занимает меньше места и всегда показывает названия четырёх вкладок.",
+  "appearanceBottomNavigationFloating": "Плавающая",
+  "appearanceBottomNavigationCompact": "Компактная"
 }
