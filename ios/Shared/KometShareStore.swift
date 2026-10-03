@@ -111,9 +111,9 @@ final class KometShareStore {
         guard values.isRegularFile == true, values.isSymbolicLink != true else {
           throw KometShareError.unsupportedAttachment
         }
-        let inferredType = Self.typeIdentifier(for: readableURL)
-        let type = typeIdentifier == nil || typeIdentifier == "public.data" || typeIdentifier == "public.item"
-          ? inferredType : typeIdentifier!
+        let type = Self.resolvedType(
+          typeIdentifier, fileNames: [readableURL.lastPathComponent, suggestedName]
+        )
         let name = Self.fileName(suggestedName ?? readableURL.lastPathComponent, typeIdentifier: type)
         let destination = try self.destination(in: draft, name: name)
         do {
@@ -136,6 +136,7 @@ final class KometShareStore {
     typeIdentifier: String,
     into draft: KometShareDraft
   ) throws -> KometSharedFile {
+    let typeIdentifier = Self.resolvedType(typeIdentifier, fileNames: [suggestedName])
     let name = Self.fileName(suggestedName ?? "Вложение", typeIdentifier: typeIdentifier)
     let destination = try self.destination(in: draft, name: name)
     do {
@@ -314,9 +315,27 @@ final class KometShareStore {
     try String(contentsOf: directory.appendingPathComponent("state"), encoding: .utf8)
   }
 
-  private static func typeIdentifier(for url: URL) -> String {
-    UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, url.pathExtension as CFString, nil)?
-      .takeRetainedValue() as String? ?? "public.data"
+  private static func resolvedType(_ advertised: String?, fileNames: [String?]) -> String {
+    if let advertised = advertised {
+      let mime = preferredTag(for: advertised, tagClass: kUTTagClassMIMEType)
+      let suffix = preferredTag(for: advertised, tagClass: kUTTagClassFilenameExtension)
+      if (mime != nil && mime != "application/octet-stream") || suffix != nil { return advertised }
+    }
+    let inferred = fileNames.compactMap { name -> String? in
+      guard let name = name else { return nil }
+      let suffix = (name as NSString).pathExtension
+      guard !suffix.isEmpty else { return nil }
+      return UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, suffix as CFString, nil)?
+        .takeRetainedValue() as String?
+    }
+    return inferred.first {
+      let mime = preferredTag(for: $0, tagClass: kUTTagClassMIMEType)
+      return mime != nil && mime != "application/octet-stream"
+    } ?? inferred.first ?? advertised ?? "public.data"
+  }
+
+  private static func preferredTag(for type: String, tagClass: CFString) -> String? {
+    UTTypeCopyPreferredTagWithClass(type as CFString, tagClass)?.takeRetainedValue() as String?
   }
 
   private static func fileName(_ proposed: String, typeIdentifier: String) -> String {

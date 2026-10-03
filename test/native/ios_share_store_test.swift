@@ -64,6 +64,31 @@ struct KometShareStoreTests {
     try Data("Imported synthetic document".utf8).write(to: external)
     _ = try restarted.importDocument(documentURL: external)
     try expect(manager.fileExists(atPath: external.path), "Document import must preserve the original")
+
+    let typed = try restarted.beginRequest()
+    let imageURL = container.appendingPathComponent("synthetic.png")
+    try Data("synthetic image bytes".utf8).write(to: imageURL)
+    let image = try restarted.copyFile(
+      at: imageURL, suggestedName: "Shared image", typeIdentifier: "public.image", into: typed
+    )
+    try expect(image.mime == "image/png", "Abstract image type must use the source file type")
+    try expect(image.name == "Shared image.png", "Inferred image type must add its proper extension")
+    let pdfURL = container.appendingPathComponent("synthetic.pdf")
+    try Data("synthetic PDF bytes".utf8).write(to: pdfURL)
+    let pdf = try restarted.copyFile(
+      at: pdfURL, suggestedName: "Shared document", typeIdentifier: "public.data", into: typed
+    )
+    try expect(pdf.mime == "application/pdf", "Generic data type must use the document file type")
+    try expect(pdf.name == "Shared document.pdf", "Inferred document type must add its proper extension")
+    let advertised = try restarted.copyFile(
+      at: imageURL, suggestedName: "Specific image", typeIdentifier: "public.jpeg", into: typed
+    )
+    try expect(advertised.mime == "image/jpeg", "Specific advertised types must retain priority")
+    let named = try restarted.saveData(
+      Data("synthetic named image".utf8), suggestedName: "Shared.png", typeIdentifier: "public.image", into: typed
+    )
+    try expect(named.mime == "image/png", "Generic data representation must infer its type from the suggested name")
+    restarted.discard(typed)
     print("KometShareStore: all tests passed")
   }
 
