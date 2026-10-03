@@ -73,6 +73,9 @@ jobs:
           test/media_viewer_video_test.dart
           test/share_composer_bar_test.dart
 
+      - name: Pin kolibri crates
+        uses: ./.github/actions/pin-kolibri-crates
+
       - name: Build iOS (no codesign)
         run: |
           flutter config --no-enable-swift-package-manager
