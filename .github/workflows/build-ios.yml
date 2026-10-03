@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - master
+      - feat/ios-share-import
     paths:
       - 'lib/**'
       - 'test/**'
