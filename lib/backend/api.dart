@@ -48,6 +48,9 @@ class Api {
 
   Map<dynamic, dynamic>? _userAgent;
   Map<dynamic, dynamic>? get userAgent => _userAgent;
+  Map<String, Object?>? _shareSessionOptions;
+  Map<String, Object?>? get shareSessionOptions =>
+      _sessionState == SessionState.online ? _shareSessionOptions : null;
 
   int? _callsSeed;
   String? _deviceId;
@@ -494,6 +497,31 @@ class Api {
 
     final insecureTls = await TlsConfig.isInsecureAllowed();
     final proxy = await _buildProxyUrl();
+
+    _shareSessionOptions = Map.unmodifiable({
+      'host': endpoint.host,
+      'port': endpoint.port,
+      'trust_mincifry_ca': endpoint.trustMincifryCa,
+      'device_id': deviceId,
+      'instance_id': instanceId,
+      'app_version': appVersion,
+      'build_number': buildNumber,
+      'device_type': deviceType,
+      'os_version': osVersion,
+      'timezone': timezone,
+      'screen': screen,
+      'push_device_type': pushDeviceType,
+      'arch': architecture,
+      'locale': locale,
+      'device_name': deviceName,
+      'device_locale': deviceLocale,
+      'client_session_id': clientSessionId,
+      'ping_interval_secs': ServerConfig.pingInterval.inSeconds,
+      'ping_interactive': !KometSettings.ghostMode.value,
+      'auto_reconnect': false,
+      'insecure_tls': insecureTls,
+      'proxy': proxy,
+    });
 
     return openSessionWithWireLog(
       host: endpoint.host,

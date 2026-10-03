@@ -21,8 +21,49 @@ final class KometShareBridge {
       }
       perform(result) { store in
         try store.acknowledge(id: id)
+        return nil
+      }
+    case "releaseShare":
+      guard let id = (call.arguments as? [String: Any])?["id"] as? String else {
+        result(FlutterError(code: "INVALID_SHARE", message: "Missing share ID", details: nil))
+        return
+      }
+      perform(result) { store in
         try store.removeCompleted(id: id)
         return nil
+      }
+    case "syncShareAccount":
+      guard let arguments = call.arguments as? [String: Any] else {
+        result(FlutterError(code: "INVALID_SHARE_ACCOUNT", message: "Missing share account", details: nil))
+        return
+      }
+      perform(result) { _ in
+        try KometShareAccounts().sync(arguments)
+        return nil
+      }
+    case "clearShareAccount":
+      guard let id = (call.arguments as? [String: Any])?["accountId"] as? String else {
+        result(FlutterError(code: "INVALID_SHARE_ACCOUNT", message: "Missing account ID", details: nil))
+        return
+      }
+      perform(result) { _ in
+        try KometShareAccounts().clear(accountID: id)
+        return nil
+      }
+    case "clearAllShareAccounts":
+      perform(result) { _ in
+        try KometShareAccounts().clear(accountID: nil)
+        return nil
+      }
+    case "readShareToken":
+      guard let arguments = call.arguments as? [String: Any],
+            let id = arguments["accountId"] as? String,
+            let knownToken = arguments["knownToken"] as? String else {
+        result(FlutterError(code: "INVALID_SHARE_ACCOUNT", message: "Missing account credentials", details: nil))
+        return
+      }
+      perform(result) { _ in
+        try KometShareAccounts().refreshedToken(accountID: id, knownToken: knownToken)
       }
     case "clearCache":
       result(nil)

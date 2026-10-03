@@ -79,6 +79,7 @@ import 'frontend/screens/calls/call_screen.dart';
 import 'core/push/fkm_controller.dart';
 import 'core/push/notification_bridge.dart';
 import 'core/share/share_intent_bridge.dart';
+import 'core/share/native_share_account_sync.dart';
 import 'core/push/push_service.dart';
 import 'core/storage/app_database.dart';
 import 'core/transport/tls_config.dart';
@@ -454,6 +455,7 @@ class KometAppState extends State<KometApp>
     CallBridge.instance.init();
     NotificationBridge.instance.init();
     ShareIntentBridge.instance.init();
+    NativeShareAccountSync.instance.init(api, accountModule, chats);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       CallBridge.instance.checkInitialCall();
       unawaited(NotificationBridge.instance.checkInitialChat());
@@ -586,6 +588,7 @@ class KometAppState extends State<KometApp>
 
   @override
   void dispose() {
+    NativeShareAccountSync.instance.dispose();
     _finishReveal();
     _sessionExpiredSub?.cancel();
     _loginStatusSub?.cancel();

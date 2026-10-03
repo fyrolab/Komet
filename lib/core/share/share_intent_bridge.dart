@@ -31,6 +31,7 @@ class ShareIntentBridge {
     consume: () => _method.invokeMethod<dynamic>('consumeInitialShare'),
     acknowledge: (id) =>
         _method.invokeMethod<void>('acknowledgeShare', {'id': id}),
+    release: (id) => _method.invokeMethod<void>('releaseShare', {'id': id}),
     onShare: _receivePayload,
   );
 
@@ -135,14 +136,15 @@ class ShareIntentBridge {
   }
 
   Future<void> _finishShare(SharedPayload payload) async {
+    Future<void> waitForFiles() => SharedFileUsage.instance.waitUntilUnused(
+      payload.files.map((file) => file.path),
+    );
     try {
-      await SharedFileUsage.instance.waitUntilUnused(
-        payload.files.map((file) => file.path),
-      );
       if (Platform.isIOS) {
-        await _inbox.complete();
-      } else if (_pending == null) {
-        await clearCache();
+        await _inbox.complete(waitForRelease: waitForFiles);
+      } else {
+        await waitForFiles();
+        if (_pending == null) await clearCache();
       }
     } catch (e) {
       logger.w('ShareIntentBridge.complete: $e');

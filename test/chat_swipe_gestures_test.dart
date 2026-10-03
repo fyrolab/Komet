@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:komet/core/utils/haptics.dart';
 import 'package:komet/frontend/widgets/swipe_route.dart';
 import 'package:komet/frontend/widgets/swipe_to_reply.dart';
+import 'package:komet/frontend/widgets/scroll_keyboard_dismiss.dart';
 
 const _backgroundKey = ValueKey('background');
 const _pageKey = ValueKey('page');
@@ -31,25 +32,28 @@ class _Harness {
             body: Column(
               children: [
                 Expanded(
-                  child: CustomScrollView(
-                    controller: scroll,
-                    reverse: true,
-                    keyboardDismissBehavior:
-                        ScrollViewKeyboardDismissBehavior.onDrag,
-                    slivers: [
-                      SliverList.builder(
-                        itemCount: 30,
-                        itemBuilder: (_, index) => SwipeToReply(
-                          onReply: () => replies++,
-                          child: SizedBox(
-                            key: index == 2 ? _messageKey : null,
-                            height: 100,
-                            width: double.infinity,
-                            child: Text('Synthetic message $index'),
+                  child: ScrollKeyboardDismiss(
+                    onDismiss: focus.unfocus,
+                    child: CustomScrollView(
+                      controller: scroll,
+                      reverse: true,
+                      keyboardDismissBehavior:
+                          ScrollViewKeyboardDismissBehavior.manual,
+                      slivers: [
+                        SliverList.builder(
+                          itemCount: 30,
+                          itemBuilder: (_, index) => SwipeToReply(
+                            onReply: () => replies++,
+                            child: SizedBox(
+                              key: index == 2 ? _messageKey : null,
+                              height: 100,
+                              width: double.infinity,
+                              child: Text('Synthetic message $index'),
+                            ),
                           ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
                 ),
                 TextField(focusNode: focus),
@@ -256,7 +260,17 @@ void main() {
       final harness = _Harness();
       await harness.pump(tester);
       await tester.showKeyboard(find.byType(TextField));
-      await tester.drag(find.byKey(_messageKey), const Offset(12, 100));
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byKey(_messageKey)),
+      );
+      for (var step = 1; step <= 8; step++) {
+        await gesture.moveBy(
+          const Offset(1, 14),
+          timeStamp: Duration(milliseconds: step * 28),
+        );
+        await tester.pump(const Duration(milliseconds: 28));
+      }
+      await gesture.up(timeStamp: const Duration(milliseconds: 230));
       await tester.pumpAndSettle();
       expect(harness.scroll.offset, greaterThan(0));
       expect(harness.focus.hasFocus, isFalse);
@@ -266,6 +280,72 @@ void main() {
       await harness.dispose(tester);
     },
   );
+
+  testWidgets('slow vertical scrolling keeps the keyboard open', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await harness.pump(tester);
+    await tester.showKeyboard(find.byType(TextField));
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byKey(_messageKey)),
+    );
+    for (var step = 1; step <= 10; step++) {
+      await gesture.moveBy(
+        const Offset(0, 10),
+        timeStamp: Duration(milliseconds: step * 140),
+      );
+      await tester.pump(const Duration(milliseconds: 140));
+      expect(harness.focus.hasFocus, isTrue);
+    }
+    await gesture.up(timeStamp: const Duration(milliseconds: 1500));
+    await tester.pumpAndSettle();
+    expect(harness.scroll.offset, greaterThan(0));
+    expect(tester.testTextInput.isVisible, isTrue);
+    expect(harness.replies, 0);
+    await harness.dispose(tester);
+  });
+
+  testWidgets('accelerating a slow scroll dismisses the keyboard', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await harness.pump(tester);
+    await tester.showKeyboard(find.byType(TextField));
+    final gesture = await tester.startGesture(
+      tester.getCenter(find.byKey(_messageKey)),
+    );
+    for (var step = 1; step <= 5; step++) {
+      await gesture.moveBy(
+        const Offset(0, 10),
+        timeStamp: Duration(milliseconds: step * 140),
+      );
+      await tester.pump(const Duration(milliseconds: 140));
+    }
+    expect(harness.focus.hasFocus, isTrue);
+    for (var step = 1; step <= 8; step++) {
+      await gesture.moveBy(
+        const Offset(0, 12),
+        timeStamp: Duration(milliseconds: 700 + step * 20),
+      );
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+    expect(harness.focus.hasFocus, isFalse);
+    await gesture.up(timeStamp: const Duration(milliseconds: 880));
+    await tester.pumpAndSettle();
+    await harness.dispose(tester);
+  });
+
+  testWidgets('programmatic scrolling keeps the keyboard open', (tester) async {
+    final harness = _Harness();
+    await harness.pump(tester);
+    await tester.showKeyboard(find.byType(TextField));
+    harness.scroll.jumpTo(400);
+    await tester.pumpAndSettle();
+    expect(harness.focus.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+    await harness.dispose(tester);
+  });
 
   testWidgets('a blocked pop does not dismiss the composer or move the page', (
     tester,

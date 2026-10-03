@@ -44,6 +44,18 @@ struct KometShareDraft {
   let createdAt: TimeInterval
 }
 
+struct KometOutgoingShare: Codable {
+  let id: String
+  let createdAt: TimeInterval
+  let accountID: String
+  let chatID: String
+  let chatTitle: String
+  let files: [KometSharedFile]
+  let text: String?
+  var status: String
+  var message: String?
+}
+
 final class KometShareStore {
   static let maximumAttachments = 30
 
@@ -59,6 +71,7 @@ final class KometShareStore {
   private let stagingURL: URL
   private let requestsURL: URL
   private let quarantineURL: URL
+  private let outgoingURL: URL
 
   convenience init() throws {
     let configured = Bundle.main.object(forInfoDictionaryKey: "KometShareAppGroup") as? String
@@ -76,8 +89,10 @@ final class KometShareStore {
     stagingURL = root.appendingPathComponent("staging", isDirectory: true)
     requestsURL = root.appendingPathComponent("requests", isDirectory: true)
     quarantineURL = root.appendingPathComponent("quarantine", isDirectory: true)
+    outgoingURL = root.appendingPathComponent("outgoing", isDirectory: true)
     try manager.createDirectory(at: stagingURL, withIntermediateDirectories: true)
     try manager.createDirectory(at: requestsURL, withIntermediateDirectories: true)
+    try manager.createDirectory(at: outgoingURL, withIntermediateDirectories: true)
   }
 
   func beginRequest() throws -> KometShareDraft {
@@ -176,6 +191,76 @@ final class KometShareStore {
 
   func discard(_ draft: KometShareDraft) {
     try? manager.removeItem(at: draft.directoryURL)
+  }
+
+  func prepareOutgoing(
+    _ draft: KometShareDraft, files: [KometSharedFile], text: String?,
+    accountID: String, chatID: String, chatTitle: String
+  ) throws -> KometOutgoingShare {
+    guard Int64(accountID) != nil, Int64(chatID) != nil else { throw KometShareError.invalidRequest }
+    let text = Self.nonempty(text)
+    try validate(Manifest(id: draft.id, createdAt: draft.createdAt, files: files, text: text, subject: nil), at: draft.directoryURL)
+    let outgoing = KometOutgoingShare(
+      id: draft.id, createdAt: draft.createdAt, accountID: accountID, chatID: chatID,
+      chatTitle: chatTitle, files: files, text: text, status: "prepared", message: nil
+    )
+    try writeOutgoing(outgoing, at: draft.directoryURL)
+    try manager.moveItem(at: draft.directoryURL, to: outgoingDirectory(id: draft.id))
+    return outgoing
+  }
+
+  func outgoingShares() throws -> [KometOutgoingShare] {
+    let directories = try manager.contentsOfDirectory(at: outgoingURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+    var shares: [KometOutgoingShare] = []
+    for directory in directories {
+      guard let data = try? Data(contentsOf: directory.appendingPathComponent("outgoing.json")),
+            let share = try? JSONDecoder().decode(KometOutgoingShare.self, from: data),
+            share.id == directory.lastPathComponent, UUID(uuidString: share.id) != nil else { continue }
+      shares.append(share)
+    }
+    return shares.sorted { $0.createdAt > $1.createdAt }
+  }
+
+  func outgoingRequest(_ share: KometOutgoingShare) throws -> [String: Any] {
+    let directory = try outgoingDirectory(id: share.id)
+    try validate(Manifest(id: share.id, createdAt: share.createdAt, files: share.files, text: share.text, subject: nil), at: directory)
+    return [
+      "id": share.id, "chat_id": share.chatID, "text": share.text ?? "",
+      "state_path": directory.appendingPathComponent("send-state.json").path,
+      "files": share.files.map { file -> [String: Any] in
+        ["path": directory.appendingPathComponent(file.relativePath).path,
+         "name": file.name, "mime": file.mime, "size": file.size]
+      }
+    ]
+  }
+
+  func updateOutgoing(_ share: KometOutgoingShare, status: String, message: String?) throws -> KometOutgoingShare {
+    guard ["prepared", "sending", "failed", "unknown", "sent"].contains(status) else {
+      throw KometShareError.invalidRequest
+    }
+    var updated = share
+    updated.status = status
+    updated.message = message
+    try writeOutgoing(updated, at: outgoingDirectory(id: share.id))
+    return updated
+  }
+
+  func removeOutgoing(id: String) throws {
+    let directory = try outgoingDirectory(id: id)
+    if manager.fileExists(atPath: directory.path) { try manager.removeItem(at: directory) }
+  }
+
+  private func outgoingDirectory(id: String) throws -> URL {
+    guard UUID(uuidString: id) != nil, !id.contains("/"), !id.contains("\\") else { throw KometShareError.invalidRequest }
+    return outgoingURL.appendingPathComponent(id, isDirectory: true)
+  }
+
+  private func writeOutgoing(_ share: KometOutgoingShare, at directory: URL) throws {
+    var options: Data.WritingOptions = [.atomic]
+    #if os(iOS)
+    options.insert(.completeFileProtectionUntilFirstUserAuthentication)
+    #endif
+    try JSONEncoder().encode(share).write(to: directory.appendingPathComponent("outgoing.json"), options: options)
   }
 
   @discardableResult

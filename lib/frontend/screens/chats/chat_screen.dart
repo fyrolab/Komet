@@ -109,6 +109,7 @@ import '../../widgets/small_spinner.dart';
 import '../../widgets/swipe_to_pop.dart';
 import '../../widgets/swipe_route.dart';
 import '../../widgets/swipe_to_reply.dart';
+import '../../widgets/scroll_keyboard_dismiss.dart';
 import '../../widgets/reload_on_reconnect.dart';
 import '../../widgets/schedule_time_picker.dart';
 import '../../widgets/chat_wallpaper_sheet.dart';
@@ -5646,7 +5647,10 @@ class _ChatScreenState extends State<ChatScreen>
               }
               return false;
             },
-            child: _buildMessagesList(),
+            child: ScrollKeyboardDismiss(
+              onDismiss: _messageFocusNode.unfocus,
+              child: _buildMessagesList(),
+            ),
           ),
         ),
         if (showShimmer)
@@ -5716,7 +5720,7 @@ class _ChatScreenState extends State<ChatScreen>
                     controller: _scrollController,
                     reverse: true,
                     keyboardDismissBehavior:
-                        ScrollViewKeyboardDismissBehavior.onDrag,
+                        ScrollViewKeyboardDismissBehavior.manual,
                     physics: _listPhysics,
                     cacheExtent: cacheExtent,
                     slivers: [

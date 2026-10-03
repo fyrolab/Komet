@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
 import '../../../../models/attachment.dart';
+import '../../../../core/media/preview_image.dart';
 import '../../photo_viewer.dart';
 import '../photo_hero.dart';
 import 'bubble_context.dart';
@@ -243,8 +244,12 @@ class PhotoBubble extends StatelessWidget {
         fit: BoxFit.cover,
         cacheWidth: memWidth,
         gaplessPlayback: true,
+        frameBuilder: (_, child, frame, synchronouslyLoaded) =>
+            frame != null || synchronouslyLoaded
+            ? child
+            : _buildPreviewImage(ctx, photo, width, height),
         errorBuilder: (_, _, _) =>
-            _buildPhotoPlaceholder(ctx.cs, width, height),
+            _buildPreviewImage(ctx, photo, width, height),
       );
     }
     final imageUrl = photo.baseUrl ?? '';
@@ -258,10 +263,29 @@ class PhotoBubble extends StatelessWidget {
         memCacheHeight: memHeight,
         fadeInDuration: Duration.zero,
         placeholderFadeInDuration: Duration.zero,
-        errorWidget: (_, _, _) => _buildPhotoPlaceholder(ctx.cs, width, height),
+        placeholder: (_, _) => _buildPreviewImage(ctx, photo, width, height),
+        errorWidget: (_, _, _) => _buildPreviewImage(ctx, photo, width, height),
       );
     }
-    return _buildPhotoPlaceholder(ctx.cs, width, height);
+    return _buildPreviewImage(ctx, photo, width, height);
+  }
+
+  Widget _buildPreviewImage(
+    BubbleContext ctx,
+    PhotoAttachment photo,
+    double width,
+    double height,
+  ) {
+    final preview = dataUriImage(photo, photo.previewData);
+    if (preview == null) return _buildPhotoPlaceholder(ctx.cs, width, height);
+    return Image(
+      image: preview,
+      width: width,
+      height: height,
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
+      errorBuilder: (_, _, _) => _buildPhotoPlaceholder(ctx.cs, width, height),
+    );
   }
 
   Widget _buildUploadOverlay(

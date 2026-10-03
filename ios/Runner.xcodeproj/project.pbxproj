@@ -8,7 +8,11 @@
 
 /* Begin PBXBuildFile section */
 		08023DAB67DBB860F77BB775 /* KometShareBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B9DFBD85E3205C9ADEB401D /* KometShareBridge.swift */; };
+		08FF3772A2078A4B61170118 /* KometShareSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = E562D26E56EEB9A6420AD72B /* KometShareSender.swift */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
+		1FFB85AE0D947E2ADC636611 /* SystemConfiguration.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 026D2485025695542ED117DB /* SystemConfiguration.framework */; };
+		250163B69AF01F1A321BD151 /* KometShareAccounts.swift in Sources */ = {isa = PBXBuildFile; fileRef = D53D7B6C0957C1CD6DB59B64 /* KometShareAccounts.swift */; };
+		305C0A6BA857D51078A0BBE8 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A63E96B763FA654541020DC2 /* Security.framework */; };
 		331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C807B294A618700263BE5 /* RunnerTests.swift */; };
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
 		4B1A4BBCD56B3CE42AD0A480 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 789A1AEF2F4FF7DEED202476 /* Pods_Runner.framework */; };
@@ -16,9 +20,12 @@
 		75B17B7F1F62BC021A1BE9C0 /* KometShareStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDAACAA16E141CC00CF7D7A6 /* KometShareStore.swift */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 		84C5FAB35E4A95AA6E2C518F /* ShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 4D596EC330D2D8F8B8A26AB6 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		8B650DA70DC4BDFC02F5F1BE /* KometShareAccounts.swift in Sources */ = {isa = PBXBuildFile; fileRef = D53D7B6C0957C1CD6DB59B64 /* KometShareAccounts.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
+		992D92E93FC84DF35C61C032 /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F7A1887EA57B6C16B500C901 /* CoreFoundation.framework */; };
+		9BDF85BC70348818AEF10CBA /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A63E96B763FA654541020DC2 /* Security.framework */; };
 		AA11BB22CC33DD44EE550101 /* KometVideo.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550001 /* KometVideo.swift */; };
 		AA11BB22CC33DD44EE550102 /* KometVideoNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550002 /* KometVideoNote.swift */; };
 		AA11BB22CC33DD44EE550103 /* KometNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550003 /* KometNotifications.swift */; };
@@ -72,6 +79,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		026D2485025695542ED117DB /* SystemConfiguration.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SystemConfiguration.framework; path = System/Library/Frameworks/SystemConfiguration.framework; sourceTree = SDKROOT; };
+		0DFF6CD45C769B95007FA37C /* KometShareTransport.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = KometShareTransport.h; sourceTree = "<group>"; };
 		1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GeneratedPluginRegistrant.h; sourceTree = "<group>"; };
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
 		1615A82960D98F780416FDE7 /* Pods-RunnerTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.debug.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.debug.xcconfig"; sourceTree = "<group>"; };
@@ -103,11 +112,16 @@
 		9D7B0FFE63E0BD5D67D7758D /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
 		A1B2C3D41234567890ABCDEF /* MinimalIcon@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "MinimalIcon@2x.png"; sourceTree = "<group>"; };
 		A1B2C3D41234567890ABCDF0 /* MinimalIcon@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "MinimalIcon@3x.png"; sourceTree = "<group>"; };
+		A63E96B763FA654541020DC2 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		A92990150F2CFE8F72ACA01D /* ShareExtension-Bridging-Header.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = "ShareExtension-Bridging-Header.h"; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550001 /* KometVideo.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometVideo.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550002 /* KometVideoNote.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometVideoNote.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550003 /* KometNotifications.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometNotifications.swift; sourceTree = "<group>"; };
 		AA11BB22CC33DD44EE550004 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
+		D53D7B6C0957C1CD6DB59B64 /* KometShareAccounts.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KometShareAccounts.swift; sourceTree = "<group>"; };
 		DD7AE0A574C0096D5FAD78ED /* ShareExtension.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = ShareExtension.entitlements; sourceTree = "<group>"; };
+		E562D26E56EEB9A6420AD72B /* KometShareSender.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KometShareSender.swift; sourceTree = "<group>"; };
+		F7A1887EA57B6C16B500C901 /* CoreFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreFoundation.framework; path = System/Library/Frameworks/CoreFoundation.framework; sourceTree = SDKROOT; };
 		FDAACAA16E141CC00CF7D7A6 /* KometShareStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KometShareStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -126,6 +140,7 @@
 			files = (
 				78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */,
 				4B1A4BBCD56B3CE42AD0A480 /* Pods_Runner.framework in Frameworks */,
+				305C0A6BA857D51078A0BBE8 /* Security.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -134,6 +149,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				F2AE94BDADA90981E47049F4 /* Foundation.framework in Frameworks */,
+				9BDF85BC70348818AEF10CBA /* Security.framework in Frameworks */,
+				1FFB85AE0D947E2ADC636611 /* SystemConfiguration.framework in Frameworks */,
+				992D92E93FC84DF35C61C032 /* CoreFoundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -160,6 +178,7 @@
 			isa = PBXGroup;
 			children = (
 				FDAACAA16E141CC00CF7D7A6 /* KometShareStore.swift */,
+				D53D7B6C0957C1CD6DB59B64 /* KometShareAccounts.swift */,
 			);
 			name = Shared;
 			path = Shared;
@@ -171,6 +190,9 @@
 				789A1AEF2F4FF7DEED202476 /* Pods_Runner.framework */,
 				2AE8CB2654009FE276CACA4B /* Pods_RunnerTests.framework */,
 				273DBF548AF5F861F4ECFA72 /* iOS */,
+				A63E96B763FA654541020DC2 /* Security.framework */,
+				026D2485025695542ED117DB /* SystemConfiguration.framework */,
+				F7A1887EA57B6C16B500C901 /* CoreFoundation.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -253,6 +275,9 @@
 				6792C66B074C477FB31A4F02 /* ShareViewController.swift */,
 				5BCC4AC804992BB0EA5A482D /* Info.plist */,
 				DD7AE0A574C0096D5FAD78ED /* ShareExtension.entitlements */,
+				E562D26E56EEB9A6420AD72B /* KometShareSender.swift */,
+				0DFF6CD45C769B95007FA37C /* KometShareTransport.h */,
+				A92990150F2CFE8F72ACA01D /* ShareExtension-Bridging-Header.h */,
 			);
 			name = ShareExtension;
 			path = ShareExtension;
@@ -284,6 +309,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6822FE34AA51E883AF823E25 /* Build configuration list for PBXNativeTarget "ShareExtension" */;
 			buildPhases = (
+				8FF0C1E27BC3C7E3DAF66650 /* Build Komet Share Transport */,
 				94B926CD9634D1A633E8EAD9 /* Sources */,
 				E89D38CE2057ADBFEDB4C260 /* Frameworks */,
 				D8F9BDC0BB3F15064E678827 /* Resources */,
@@ -465,6 +491,26 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
+		8FF0C1E27BC3C7E3DAF66650 /* Build Komet Share Transport */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Komet Share Transport";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/KometShareTransport/libkomet_share.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "\"$SRCROOT/../scripts/build_ios_share.sh\"";
+		};
 		942752100DC29827FE94D2B2 /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -519,6 +565,8 @@
 			files = (
 				75B17B7F1F62BC021A1BE9C0 /* KometShareStore.swift in Sources */,
 				D3E790B969E6525B6B35F151 /* ShareViewController.swift in Sources */,
+				250163B69AF01F1A321BD151 /* KometShareAccounts.swift in Sources */,
+				08FF3772A2078A4B61170118 /* KometShareSender.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -533,6 +581,7 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				BB80EDFFF111F138D3411790 /* KometShareStore.swift in Sources */,
 				08023DAB67DBB860F77BB775 /* KometShareBridge.swift in Sources */,
+				8B650DA70DC4BDFC02F5F1BE /* KometShareAccounts.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -705,6 +754,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ShareExtension/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
@@ -713,10 +763,17 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-force_load",
+					"\"$(BUILT_PRODUCTS_DIR)/KometShareTransport/libkomet_share.a\"",
+					"-liconv",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = ru.komet.app.ShareExtension;
 				PRODUCT_NAME = ShareExtension;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "ShareExtension/ShareExtension-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;
@@ -731,6 +788,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ShareExtension/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
@@ -739,10 +797,17 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-force_load",
+					"\"$(BUILT_PRODUCTS_DIR)/KometShareTransport/libkomet_share.a\"",
+					"-liconv",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = ru.komet.app.ShareExtension;
 				PRODUCT_NAME = ShareExtension;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "ShareExtension/ShareExtension-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -914,6 +979,7 @@
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_ENTITLEMENTS = ShareExtension/ShareExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ShareExtension/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
@@ -922,10 +988,17 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-force_load",
+					"\"$(BUILT_PRODUCTS_DIR)/KometShareTransport/libkomet_share.a\"",
+					"-liconv",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = ru.komet.app.ShareExtension;
 				PRODUCT_NAME = ShareExtension;
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "ShareExtension/ShareExtension-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;

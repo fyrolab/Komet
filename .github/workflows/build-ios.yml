@@ -11,17 +11,23 @@ on:
       - 'lib/**'
       - 'test/**'
       - 'scripts/pseudo_sign_ios.py'
+      - 'scripts/build_ios_share.sh'
+      - 'native/komet_share/**'
       - 'ios/**'
       - 'pubspec.yaml'
       - '.github/workflows/build-ios.yml'
+      - '.github/actions/setup-rust/**'
   pull_request:
     paths:
       - 'lib/**'
       - 'test/**'
       - 'scripts/pseudo_sign_ios.py'
+      - 'scripts/build_ios_share.sh'
+      - 'native/komet_share/**'
       - 'ios/**'
       - 'pubspec.yaml'
       - '.github/workflows/build-ios.yml'
+      - '.github/actions/setup-rust/**'
 
 env:
   FLUTTER_VERSION: '3.44.3'
@@ -55,6 +61,16 @@ jobs:
         run: |
           swiftc -suppress-warnings ios/Shared/KometShareStore.swift test/native/ios_share_store_test.swift -o /tmp/ios-share-store-tests
           /tmp/ios-share-store-tests
+          swiftc -suppress-warnings ios/Shared/KometShareStore.swift ios/Shared/KometShareAccounts.swift test/native/ios_share_accounts_test.swift -o /tmp/ios-share-accounts-tests
+          /tmp/ios-share-accounts-tests
+          clang -c test/native/komet_share_transport_stub.c -o /tmp/ios-share-transport-stub.o
+          swiftc -suppress-warnings -import-objc-header ios/ShareExtension/KometShareTransport.h ios/Shared/KometShareStore.swift ios/ShareExtension/KometShareSender.swift test/native/ios_share_images_test.swift /tmp/ios-share-transport-stub.o -o /tmp/ios-share-image-tests
+          /tmp/ios-share-image-tests
+
+      - name: Verify native share transport
+        run: |
+          cargo test --locked --manifest-path native/komet_share/Cargo.toml
+          python3 -m unittest discover -s test/native -p test_ios_share_build.py -v
 
       - name: Analyze application
         run: flutter analyze lib test --no-pub --no-fatal-infos
@@ -72,6 +88,10 @@ jobs:
           test/photo_hero_test.dart
           test/media_viewer_video_test.dart
           test/share_composer_bar_test.dart
+          test/shared_photo_preview_test.dart
+          test/share_account_snapshot_test.dart
+          test/account_token_store_test.dart
+          test/per_chat_json_store_test.dart
 
       - name: Pin kolibri crates
         uses: ./.github/actions/pin-kolibri-crates

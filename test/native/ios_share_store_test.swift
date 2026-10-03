@@ -89,6 +89,29 @@ struct KometShareStoreTests {
     )
     try expect(named.mime == "image/png", "Generic data representation must infer its type from the suggested name")
     restarted.discard(typed)
+
+    let direct = try restarted.beginRequest()
+    let directFile = try restarted.saveData(Data("synthetic direct share".utf8), suggestedName: "direct.txt", typeIdentifier: "public.plain-text", into: direct)
+    let outgoing = try restarted.prepareOutgoing(direct, files: [directFile], text: "Caption", accountID: "12", chatID: "34", chatTitle: "Synthetic recipient")
+    let outbox = try restarted.outgoingShares()
+    try expect(outbox.count == 1 && outbox[0].id == direct.id, "Direct sends must persist in a separate outbox")
+    let outgoingPayload = try restarted.outgoingRequest(outgoing)
+    let outgoingFiles = try require(outgoingPayload["files"] as? [[String: Any]], "Outgoing files are missing")
+    let outgoingPath = try require(outgoingFiles.first?["path"] as? String, "Outgoing file path is missing")
+    try expect(manager.fileExists(atPath: outgoingPath), "Outgoing bytes must survive staging commit")
+    _ = try restarted.updateOutgoing(outgoing, status: "unknown", message: "Synthetic missing acknowledgement")
+    let afterSendRestart = try KometShareStore(containerURL: container)
+    try expect(afterSendRestart.outgoingShares().first?.status == "unknown", "Unknown network outcomes must survive restart")
+    while let queued = try afterSendRestart.nextPayload(), let id = queued["id"] as? String {
+      try expect(id != outgoing.id, "Native direct shares must never become interactive queued shares")
+      try afterSendRestart.acknowledge(id: id)
+      try afterSendRestart.removeCompleted(id: id)
+    }
+    try expect(manager.fileExists(atPath: outgoingPath), "Host queue cleanup must not remove native outbox files")
+    try expectThrows { try afterSendRestart.removeOutgoing(id: "../invalid") }
+    try afterSendRestart.removeOutgoing(id: outgoing.id)
+    try afterSendRestart.removeOutgoing(id: outgoing.id)
+    try expect(afterSendRestart.outgoingShares().isEmpty, "Explicit outbox deletion must be idempotent")
     print("KometShareStore: all tests passed")
   }
 
