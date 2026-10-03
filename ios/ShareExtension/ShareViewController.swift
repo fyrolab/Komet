@@ -103,7 +103,8 @@ final class ShareViewController: UIViewController {
     let provider = providers[index]
     messageLabel.text = "Подготавливаем вложение \(index + 1) из \(providers.count)…"
     if provider.hasItemConformingToTypeIdentifier(kUTTypeFileURL as String) {
-      progress = provider.loadItem(forTypeIdentifier: kUTTypeFileURL as String, options: nil) { item, error in
+      progress = nil
+      provider.loadItem(forTypeIdentifier: kUTTypeFileURL as String, options: nil) { item, error in
         let result = Result { () -> KometSharedFile in
           if let error = error { throw error }
           guard let url = item as? URL else { throw KometShareError.unsupportedAttachment }
@@ -185,7 +186,8 @@ final class ShareViewController: UIViewController {
   private func loadImage(
     provider: NSItemProvider, type: String, store: KometShareStore, draft: KometShareDraft
   ) {
-    progress = provider.loadItem(forTypeIdentifier: type, options: nil) { item, error in
+    progress = nil
+    provider.loadItem(forTypeIdentifier: type, options: nil) { item, error in
       let result = Result { () -> KometSharedFile in
         if let error = error { throw error }
         guard let image = item as? UIImage, let data = image.pngData() else {
@@ -201,7 +203,8 @@ final class ShareViewController: UIViewController {
   }
 
   private func loadText(provider: NSItemProvider, type: String) {
-    progress = provider.loadItem(forTypeIdentifier: type, options: nil) { item, error in
+    progress = nil
+    provider.loadItem(forTypeIdentifier: type, options: nil) { item, error in
       let result = Result { () -> String in
         if let error = error { throw error }
         if let url = item as? URL { return url.absoluteString }

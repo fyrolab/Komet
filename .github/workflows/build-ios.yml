@@ -50,6 +50,11 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
+      - name: Verify native share inbox
+        run: |
+          swiftc -suppress-warnings ios/Shared/KometShareStore.swift test/native/ios_share_store_test.swift -o /tmp/ios-share-store-tests
+          /tmp/ios-share-store-tests
+
       - name: Verify share and swipe behavior
         run: flutter test test/share_intent_test.dart test/share_inbox_test.dart test/shared_file_usage_test.dart test/chat_swipe_gestures_test.dart
 

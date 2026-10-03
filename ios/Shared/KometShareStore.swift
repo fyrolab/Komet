@@ -58,6 +58,7 @@ final class KometShareStore {
   private let manager = FileManager.default
   private let stagingURL: URL
   private let requestsURL: URL
+  private let quarantineURL: URL
 
   convenience init() throws {
     let configured = Bundle.main.object(forInfoDictionaryKey: "KometShareAppGroup") as? String
@@ -74,6 +75,7 @@ final class KometShareStore {
     let root = containerURL.appendingPathComponent("KometShare", isDirectory: true)
     stagingURL = root.appendingPathComponent("staging", isDirectory: true)
     requestsURL = root.appendingPathComponent("requests", isDirectory: true)
+    quarantineURL = root.appendingPathComponent("quarantine", isDirectory: true)
     try manager.createDirectory(at: stagingURL, withIntermediateDirectories: true)
     try manager.createDirectory(at: requestsURL, withIntermediateDirectories: true)
   }
@@ -109,7 +111,9 @@ final class KometShareStore {
         guard values.isRegularFile == true, values.isSymbolicLink != true else {
           throw KometShareError.unsupportedAttachment
         }
-        let type = typeIdentifier ?? Self.typeIdentifier(for: readableURL)
+        let inferredType = Self.typeIdentifier(for: readableURL)
+        let type = typeIdentifier == nil || typeIdentifier == "public.data" || typeIdentifier == "public.item"
+          ? inferredType : typeIdentifier!
         let name = Self.fileName(suggestedName ?? readableURL.lastPathComponent, typeIdentifier: type)
         let destination = try self.destination(in: draft, name: name)
         do {
@@ -193,17 +197,22 @@ final class KometShareStore {
     )
     var candidates: [(manifest: Manifest, directory: URL, state: String)] = []
     for directory in directories {
-      guard UUID(uuidString: directory.lastPathComponent) != nil else {
+      do {
+        guard UUID(uuidString: directory.lastPathComponent) != nil else {
+          throw KometShareError.invalidRequest
+        }
+        let state = try readState(at: directory)
+        if state == "completed" { continue }
+        guard state == "pending" || state == "claimed" else { throw KometShareError.invalidRequest }
+        let manifest = try JSONDecoder().decode(
+          Manifest.self, from: Data(contentsOf: directory.appendingPathComponent("manifest.json"))
+        )
+        guard manifest.id == directory.lastPathComponent else { throw KometShareError.invalidRequest }
+        candidates.append((manifest, directory, state))
+      } catch {
+        try quarantine(directory)
         throw KometShareError.invalidRequest
       }
-      let state = try readState(at: directory)
-      if state == "completed" { continue }
-      guard state == "pending" || state == "claimed" else { throw KometShareError.invalidRequest }
-      let manifest = try JSONDecoder().decode(
-        Manifest.self, from: Data(contentsOf: directory.appendingPathComponent("manifest.json"))
-      )
-      guard manifest.id == directory.lastPathComponent else { throw KometShareError.invalidRequest }
-      candidates.append((manifest, directory, state))
     }
     candidates.sort {
       if ($0.state == "claimed") != ($1.state == "claimed") { return $0.state == "claimed" }
@@ -213,7 +222,12 @@ final class KometShareStore {
       return $0.manifest.id < $1.manifest.id
     }
     guard let next = candidates.first else { return nil }
-    try validate(next.manifest, at: next.directory)
+    do {
+      try validate(next.manifest, at: next.directory)
+    } catch {
+      try quarantine(next.directory)
+      throw KometShareError.invalidRequest
+    }
     try writeState("claimed", at: next.directory)
     var payload: [String: Any] = [
       "id": next.manifest.id,
@@ -233,6 +247,7 @@ final class KometShareStore {
 
   func acknowledge(id: String) throws {
     let directory = try requestURL(id: id)
+    guard manager.fileExists(atPath: directory.path) else { return }
     let state = try readState(at: directory)
     guard state == "claimed" || state == "completed" else { throw KometShareError.invalidRequest }
     try writeState("completed", at: directory)
@@ -240,6 +255,7 @@ final class KometShareStore {
 
   func removeCompleted(id: String) throws {
     let directory = try requestURL(id: id)
+    guard manager.fileExists(atPath: directory.path) else { return }
     guard try readState(at: directory) == "completed" else { throw KometShareError.invalidRequest }
     try manager.removeItem(at: directory)
   }
@@ -249,6 +265,11 @@ final class KometShareStore {
       throw KometShareError.invalidRequest
     }
     return requestsURL.appendingPathComponent(id, isDirectory: true)
+  }
+
+  private func quarantine(_ directory: URL) throws {
+    try manager.createDirectory(at: quarantineURL, withIntermediateDirectories: true)
+    try manager.moveItem(at: directory, to: quarantineURL.appendingPathComponent(UUID().uuidString))
   }
 
   private func destination(in draft: KometShareDraft, name: String) throws -> URL {
