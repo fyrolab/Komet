@@ -5,23 +5,41 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../config/app_media_cache.dart';
+import 'logger.dart';
 import '../storage/app_instance.dart';
 
+// #***! дисковый кэш медиа, имя детерминированное поэтому повторно не качаем
 /// Постоянный дисковый кэш скачанных медиа (файлы, видео).
 ///
 /// Хранит файлы в `<appSupport>/media_cache/` под детерминированным именем
 /// (обычно по id вложения), чтобы повторные открытия не качали заново.
 class MediaCache {
   /// Максимальный размер кэша (настраивается в дев-меню); при превышении
-  /// вытесняются старые файлы (LRU).
+  /// вытесняются старые файлы (LRU), кроме закреплённых.
   static int get maxBytes => AppMediaCacheLimit.current.value;
 
+  static const String keptPrefix = 'keep_';
+
+  // #***! размер держим в памяти, каталог не пересканируем
   static Directory? _dir;
   static int? _cachedSize;
   static final Map<String, Future<File?>> _inFlight = {};
   static final Set<String> _present = {};
   static final Map<String, ValueNotifier<bool>> _presence = {};
 
+  @visibleForTesting
+  static void resetForTesting() {
+    _dir = null;
+    _cachedSize = null;
+    _inFlight.clear();
+    _present.clear();
+    for (final notifier in _presence.values) {
+      notifier.dispose();
+    }
+    _presence.clear();
+  }
+
+  // #***! у каждой копии приложения свой каталог
   static Future<Directory> _cacheDir() async {
     final cached = _dir;
     if (cached != null) return cached;
@@ -34,6 +52,33 @@ class MediaCache {
     }
     _dir = dir;
     return dir;
+  }
+
+  /// Имя закреплённой копии файла [name].
+  ///
+  /// Закреплённые файлы не вытесняются по LRU: удалённое медиа сервер уже
+  /// стёр, скачать его заново неоткуда.
+  static String keptName(String name) => '$keptPrefix${_sanitize(name)}';
+
+  /// Кладёт [name] в закреплённую часть кэша — копией готового [source]
+  /// либо загрузкой [url]. Возвращает закреплённый файл.
+  static Future<File?> keep(String name, {File? source, String? url}) async {
+    final pinned = keptName(name);
+    final ready = await existing(pinned);
+    if (ready != null) return ready;
+    if (source != null) {
+      try {
+        final target = await fileFor(pinned);
+        await source.copy(target.path);
+        _markPresent(pinned, true);
+        _cachedSize = null;
+        return target;
+      } catch (e) {
+        logger.w('[cache] не закрепил $name: $e');
+      }
+    }
+    if (url == null || url.isEmpty) return null;
+    return getOrDownload(pinned, url);
   }
 
   /// Путь к кэш-файлу с именем [name] (файл может ещё не существовать).
@@ -51,6 +96,7 @@ class MediaCache {
     return files;
   }
 
+  // #***! попадание обновляет mtime, на нём держится LRU
   /// Существует ли непустой кэш-файл [name].
   ///
   /// При попадании обновляет mtime файла — это делает вытеснение LRU
@@ -68,14 +114,28 @@ class MediaCache {
     return null;
   }
 
+  static Future<void> discard(String name) async {
+    final file = await fileFor(name);
+    try {
+      if (await file.exists()) await file.delete();
+    } catch (e) {
+      logger.w('[cache] не удалил $name: $e');
+    }
+    _markPresent(name, false);
+    _cachedSize = null;
+  }
+
+  // #***! скачивание с защитой от параллельных запросов
   /// Возвращает кэш-файл [name], скачивая [url] при отсутствии.
   ///
   /// Загрузка идёт во временный `.part` и переименовывается атомарно —
   /// прерванная закачка не считается валидным кэшем.
+  // #***! maxBytes рвёт поток, объявленный килобайт бывает гигабайтами
   static Future<File?> getOrDownload(
     String name,
     String url, {
     void Function(double progress)? onProgress,
+    int? maxBytes,
   }) async {
     final existingFile = await existing(name);
     if (existingFile != null) return existingFile;
@@ -83,7 +143,7 @@ class MediaCache {
     final running = _inFlight[name];
     if (running != null) return running;
 
-    final future = _download(name, url, onProgress);
+    final future = _download(name, url, onProgress, maxBytes);
     _inFlight[name] = future;
     try {
       return await future;
@@ -92,10 +152,12 @@ class MediaCache {
     }
   }
 
+  // #***! качаем в .part и переименовываем, недокачанное не станет валидным кэшем
   static Future<File?> _download(
     String name,
     String url,
     void Function(double progress)? onProgress,
+    int? maxBytes,
   ) async {
     final file = await fileFor(name);
     final part = File('${file.path}.part');
@@ -106,16 +168,33 @@ class MediaCache {
       if (response.statusCode != 200) return null;
 
       final total = response.contentLength;
+      // #***! сервер врёт и в обещанном размере, и в потоке
+      if (maxBytes != null && total > maxBytes) {
+        logger.w('[cache] $name: обещано $total байт, предел $maxBytes');
+        return null;
+      }
       var received = 0;
       final sink = part.openWrite();
+      var overflowed = false;
       await for (final chunk in response) {
         received += chunk.length;
+        if (maxBytes != null && received > maxBytes) {
+          overflowed = true;
+          break;
+        }
         sink.add(chunk);
         if (onProgress != null && total > 0) {
           onProgress(received / total);
         }
       }
       await sink.close();
+      if (overflowed) {
+        logger.w('[cache] $name: поток превысил предел $maxBytes байт');
+        try {
+          if (await part.exists()) await part.delete();
+        } catch (_) {}
+        return null;
+      }
       await part.rename(file.path);
       _markPresent(name, true);
       final known = _cachedSize;
@@ -138,6 +217,7 @@ class MediaCache {
     }
   }
 
+  // #***! размер считаем инкрементально
   /// Суммарный размер кэша в байтах.
   ///
   /// Результат держится в памяти и поддерживается инкрементально при
@@ -183,6 +263,7 @@ class MediaCache {
     return freed;
   }
 
+  // #***! под лимитом выходим сразу, каталог обходим только при превышении
   /// Вытесняет старые файлы (по mtime), пока размер превышает [maxBytes].
   ///
   /// Под лимитом — ранний выход без сканирования каталога (частый случай).
@@ -198,28 +279,34 @@ class MediaCache {
     }
 
     final dir = await _cacheDir();
-    final files = <File>[];
+    // #***! stat снимаем по разу на файл: в компараторе он звался бы
+    // синхронно и по два раза на сравнение, то есть тысячи блокирующих
+    // сисколлов на изоляте интерфейса
+    final entries = <({File file, DateTime modified, int size})>[];
     await for (final entity in dir.list()) {
-      if (entity is File && !entity.path.endsWith('.part')) {
-        files.add(entity);
-      }
+      if (entity is! File || entity.path.endsWith('.part')) continue;
+      if (p.basename(entity.path).startsWith(keptPrefix)) continue;
+      try {
+        final stat = await entity.stat();
+        entries.add((file: entity, modified: stat.modified, size: stat.size));
+      } catch (_) {}
     }
 
-    files.sort(
-      (a, b) => a.statSync().modified.compareTo(b.statSync().modified),
-    );
+    // #***! сортируем по времени доступа и удаляем старое
+    entries.sort((a, b) => a.modified.compareTo(b.modified));
 
-    for (final file in files) {
+    for (final entry in entries) {
       if (total <= limit) break;
       try {
-        total -= await file.length();
-        await file.delete();
-        _markAbsentByBasename(p.basename(file.path));
+        await entry.file.delete();
+        total -= entry.size;
+        _markAbsentByBasename(p.basename(entry.file.path));
       } catch (_) {}
     }
     _cachedSize = total;
   }
 
+  // #***! флаг файл скачан для иконки в пузыре
   /// Реактивный флаг наличия файла [name] в кэше (для UI-иконки «скачано»).
   static ValueListenable<bool> presence(String name) {
     final key = _sanitize(name);
@@ -243,6 +330,7 @@ class MediaCache {
     }
   }
 
+  // #***! запрещённые символы в имени в подчёркивания
   static String _sanitize(String name) {
     final cleaned = name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_').trim();
     return cleaned.isEmpty ? 'file' : cleaned;

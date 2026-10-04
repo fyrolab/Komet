@@ -2,20 +2,25 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
+import '../../../../backend/modules/chats.dart';
 import '../../../../backend/modules/messages.dart';
+import '../../../../l10n/app_localizations.dart';
 import '../../../../models/attachment.dart';
 import 'bubble_context.dart';
 
-String _forwardedSourceName(ForwardedMessageAttachment forwarded) {
+String _forwardedSourceName(
+  ForwardedMessageAttachment forwarded,
+  AppLocalizations l10n,
+) {
   final resolved =
       forwarded.originalSenderName ??
       ContactCache.get(forwarded.originalSenderId);
   if (resolved != null && resolved.isNotEmpty) return resolved;
-  if (forwarded.isChannel) return 'Канал';
+  if (forwarded.isChannel) return l10n.chatScreenChannelFallback;
   if (forwarded.originalSenderId != 0) {
     return forwarded.originalSenderId.toString();
   }
-  return 'Сообщение';
+  return l10n.composerHintMessage;
 }
 
 String? _forwardedSourceAvatar(ForwardedMessageAttachment forwarded) =>
@@ -34,11 +39,39 @@ class ForwardedHeader extends StatelessWidget {
     this.padding = const EdgeInsets.only(left: 8, top: 8, right: 8),
   });
 
+  Widget _avatar(String displaySender) {
+    final senderAvatar = _forwardedSourceAvatar(forwarded);
+    final Widget avatar;
+    if (senderAvatar != null && senderAvatar.isNotEmpty) {
+      avatar = CircleAvatar(
+        radius: 10,
+        backgroundImage: CachedNetworkImageProvider(
+          senderAvatar,
+          maxWidth: 96,
+          maxHeight: 96,
+        ),
+        backgroundColor: ctx.cs.primaryContainer,
+      );
+    } else {
+      avatar = CircleAvatar(
+        radius: 10,
+        backgroundColor: ctx.cs.primaryContainer,
+        child: Text(
+          displaySender.isNotEmpty ? displaySender[0].toUpperCase() : '?',
+          style: TextStyle(fontSize: 9, color: ctx.cs.onPrimaryContainer),
+        ),
+      );
+    }
+    return Padding(padding: const EdgeInsets.only(right: 6), child: avatar);
+  }
+
   @override
   Widget build(BuildContext context) {
     final headerColor = ctx.dim;
-    final displaySender = _forwardedSourceName(forwarded);
-    final senderAvatar = _forwardedSourceAvatar(forwarded);
+    final displaySender = _forwardedSourceName(
+      forwarded,
+      AppLocalizations.of(context)!,
+    );
     final content = Padding(
       padding: padding,
       child: Row(
@@ -46,26 +79,16 @@ class ForwardedHeader extends StatelessWidget {
         children: [
           Icon(Symbols.forward, size: 14, color: headerColor),
           const SizedBox(width: 4),
-          if (senderAvatar != null && senderAvatar.isNotEmpty)
-            CircleAvatar(
-              radius: 10,
-              backgroundImage: CachedNetworkImageProvider(
-                senderAvatar,
-                maxWidth: 96,
-                maxHeight: 96,
-              ),
-              backgroundColor: ctx.cs.primaryContainer,
+          if (forwarded.isFromPrivateChat)
+            ValueListenableBuilder<int>(
+              valueListenable: chats.chatOrderRevision,
+              builder: (context, _, _) =>
+                  chats.canAccessForwardSource(forwarded)
+                  ? _avatar(displaySender)
+                  : const SizedBox.shrink(),
             )
           else
-            CircleAvatar(
-              radius: 10,
-              backgroundColor: ctx.cs.primaryContainer,
-              child: Text(
-                displaySender.isNotEmpty ? displaySender[0].toUpperCase() : '?',
-                style: TextStyle(fontSize: 9, color: ctx.cs.onPrimaryContainer),
-              ),
-            ),
-          const SizedBox(width: 6),
+            _avatar(displaySender),
           Flexible(
             child: Text(
               displaySender,

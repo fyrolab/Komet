@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:komet/l10n/app_localizations.dart';
 import 'package:image/image.dart' as img;
 import 'package:komet/backend/modules/messages.dart';
 import 'package:komet/backend/modules/share_sender.dart';
@@ -44,14 +45,20 @@ Future<void> _pumpComposer(WidgetTester tester, PreparedShare share) async {
   await _pumpWithImages(
     tester,
     MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      locale: const Locale('ru'),
       home: Scaffold(
         body: Align(
           alignment: Alignment.bottomCenter,
-          child: ShareComposerBar(
-            share: share,
-            controller: controller,
-            recipientNames: const ['Synthetic recipient'],
-            onSend: (_) async {},
+          child: Builder(
+            builder: (context) => ShareComposerBar.forShare(
+              l10n: AppLocalizations.of(context)!,
+              share: share,
+              controller: controller,
+              recipientNames: const ['Synthetic recipient'],
+              onSend: (_) async {},
+            ),
           ),
         ),
       ),
@@ -197,11 +204,14 @@ void main() {
       await _pumpWithImages(
         tester,
         MaterialApp(
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          locale: const Locale('ru'),
           home: Scaffold(
             body: Builder(
               builder: (context) => Center(
                 child: PhotoBubble(
-                  photos: [attachment],
+                  media: [attachment],
                   ctx: BubbleContext(
                     context: context,
                     cs: Theme.of(context).colorScheme,

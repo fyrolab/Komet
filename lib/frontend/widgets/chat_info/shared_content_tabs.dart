@@ -25,6 +25,7 @@ import '../custom_notification.dart';
 import '../komet_avatar.dart';
 import '../photo_viewer.dart';
 import '../reload_on_reconnect.dart';
+import '../share_unopenable_file.dart';
 import '../small_spinner.dart';
 import '../swipe_route.dart';
 import '../sheet_helpers.dart';
@@ -213,15 +214,18 @@ Widget _moreButton(ColorScheme cs, VoidCallback onTap, {bool overlay = false}) {
 
 void _notifySave(BuildContext context, MediaSaveResult result) {
   if (!context.mounted) return;
+  final l10n = AppLocalizations.of(context)!;
   if (result.ok) {
     showCustomNotification(
       context,
-      result.toGallery ? 'Сохранено в галерею' : 'Файл сохранён',
+      result.toGallery
+          ? l10n.sharedContentSavedToGallery
+          : l10n.sharedContentFileSaved,
     );
   } else {
     showCustomNotification(
       context,
-      'Не удалось сохранить: ${result.error ?? ''}',
+      l10n.notificationsSaveFailed(result.errorText(l10n)),
     );
   }
 }
@@ -734,9 +738,7 @@ class _MediaTile extends StatelessWidget {
     final att = item.attachment;
     final video = att is VideoAttachment ? att : null;
     final duration = video?.duration ?? 0;
-    final thumb = att.baseUrl?.isNotEmpty == true
-        ? att.baseUrl
-        : att.previewData;
+    final thumb = video?.thumbnail ?? att.baseUrl ?? att.previewData;
 
     return GestureDetector(
       onTap: () => _open(context),
@@ -806,7 +808,10 @@ class _MediaTile extends StatelessWidget {
       );
       if (!context.mounted) return;
       if (sources.isEmpty) {
-        showCustomNotification(context, 'Не удалось загрузить видео');
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.sharedContentVideoLoadFailed,
+        );
         return;
       }
       Navigator.of(context).push(
@@ -825,6 +830,7 @@ class _MediaTile extends StatelessWidget {
             ),
             actions: PhotoViewerActions(goToMessage: onGoToMessage),
             sourceName: sourceName,
+            videoUserAgentProvider: () => api.session?.userAgent(),
           ),
         ),
       );
@@ -851,6 +857,7 @@ class _MediaTile extends StatelessWidget {
           ),
           actions: PhotoViewerActions(goToMessage: onGoToMessage),
           sourceName: sourceName,
+          videoUserAgentProvider: () => api.session?.userAgent(),
         ),
       ),
     );
@@ -891,6 +898,7 @@ class _FileRow extends StatelessWidget {
         : '';
     final displayName = dot > 0 ? fullName.substring(0, dot) : fullName;
     final size = att.size ?? 0;
+    final sizeLabel = formatBytes(AppLocalizations.of(context)!, size);
     final cacheName = '${att.fileId}_$fullName';
 
     return InkWell(
@@ -918,9 +926,7 @@ class _FileRow extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    ext.isEmpty
-                        ? formatBytes(size)
-                        : '$ext • ${formatBytes(size)}',
+                    ext.isEmpty ? sizeLabel : '$ext • $sizeLabel',
                     style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
                   ),
                 ],
@@ -1017,8 +1023,16 @@ class _FileRow extends StatelessWidget {
     );
 
     if (!context.mounted) return;
+    final path = result.path;
+    if (result.noAppToOpen && path != null) {
+      await shareUnopenableFile(context, path);
+      return;
+    }
     if (!result.ok) {
-      showCustomNotification(context, 'Не удалось открыть файл');
+      showCustomNotification(
+        context,
+        AppLocalizations.of(context)!.downloadsOpenFailed,
+      );
     }
   }
 }
@@ -1195,9 +1209,15 @@ class _ProfileVoiceTileState extends State<_ProfileVoiceTile> {
       case VoiceAudioFailure.none:
         return;
       case VoiceAudioFailure.download:
-        showCustomNotification(context, 'Не удалось загрузить аудио');
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.sharedContentAudioLoadFailed,
+        );
       case VoiceAudioFailure.playback:
-        showCustomNotification(context, 'Ошибка воспроизведения');
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.sharedContentPlaybackError,
+        );
     }
   }
 
@@ -1206,7 +1226,8 @@ class _ProfileVoiceTileState extends State<_ProfileVoiceTile> {
     final cs = Theme.of(context).colorScheme;
     final date = DateTime.fromMillisecondsSinceEpoch(widget.item.time);
     final subtitle =
-        '${formatSecondsMmSs(_durationSec)} • ${formatDateTimeWords(date)}';
+        '${formatSecondsMmSs(_durationSec)} • '
+        '${formatDateTimeWords(AppLocalizations.of(context)!, date)}';
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),

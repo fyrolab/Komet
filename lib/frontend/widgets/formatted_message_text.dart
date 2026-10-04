@@ -8,6 +8,7 @@ import '../../backend/modules/messages.dart' show ContactCache;
 import '../../core/utils/link_opener.dart';
 import '../../core/utils/text_entities.dart';
 import '../../core/utils/text_format.dart';
+import '../../l10n/app_localizations.dart';
 import '../screens/contacts/open_contact_profile.dart';
 import 'link_text.dart';
 import 'lottie_image.dart';
@@ -77,17 +78,15 @@ class FormattedMessageText extends StatefulWidget {
             child: SizedBox(
               width: box,
               height: box,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Text(content, style: style.copyWith(fontSize: fontSize)),
-                  LottieImage(
-                    lottieUrl: animojiUrl,
-                    size: box,
-                    memCacheWidth: 96,
-                    shimmer: false,
-                  ),
-                ],
+              child: LottieImage(
+                lottieUrl: animojiUrl,
+                size: box,
+                memCacheWidth: 96,
+                shimmer: false,
+                placeholder: Text(
+                  content,
+                  style: style.copyWith(fontSize: fontSize),
+                ),
               ),
             ),
           ),
@@ -113,8 +112,44 @@ class FormattedMessageText extends StatefulWidget {
   State<FormattedMessageText> createState() => _FormattedMessageTextState();
 }
 
+class _ParsedText {
+  const _ParsedText({required this.entities, required this.segments});
+
+  final List<TextEntity> entities;
+  final List<FormatSegment> segments;
+}
+
 class _FormattedMessageTextState extends State<FormattedMessageText> {
   final List<GestureRecognizer> _recognizers = [];
+
+  // #***! разбор текста стоит четырёх регулярок, а пузырь перестраивается на
+  // каждое входящее сообщение и реакцию — держим результат до смены текста
+  late _ParsedText _parsed = _parse();
+
+  @override
+  void didUpdateWidget(FormattedMessageText old) {
+    super.didUpdateWidget(old);
+    if (old.text != widget.text || !_sameRanges(old.ranges, widget.ranges)) {
+      _parsed = _parse();
+    }
+  }
+
+  static bool _sameRanges(List<FormatRange> a, List<FormatRange> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!identical(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
+  _ParsedText _parse() {
+    final ranges = _withAutoLinks();
+    return _ParsedText(
+      entities: detectTextEntities(widget.text, skip: _claimedRanges(ranges)),
+      segments: segmentizeFormats(widget.text, ranges),
+    );
+  }
 
   @override
   void dispose() {
@@ -153,7 +188,9 @@ class _FormattedMessageTextState extends State<FormattedMessageText> {
       openContactDialogProfile(
         context,
         contactId: userId,
-        name: ContactCache.get(userId) ?? 'User #$userId',
+        name:
+            ContactCache.get(userId) ??
+            AppLocalizations.of(context)!.userFallbackName(userId),
         avatarUrl: ContactCache.getAvatar(userId),
       ),
     );
@@ -177,7 +214,11 @@ class _FormattedMessageTextState extends State<FormattedMessageText> {
           return _track(
             TapGestureRecognizer()
               ..onTap = () => unawaited(
-                copyTextEntity(context, entity.value, 'Номер скопирован'),
+                copyTextEntity(
+                  context,
+                  entity.value,
+                  AppLocalizations.of(context)!.textEntityPhoneCopied,
+                ),
               ),
           );
         }
@@ -194,7 +235,11 @@ class _FormattedMessageTextState extends State<FormattedMessageText> {
           return _track(
             TapGestureRecognizer()
               ..onTap = () => unawaited(
-                copyTextEntity(context, entity.value, 'Номер карты скопирован'),
+                copyTextEntity(
+                  context,
+                  entity.value,
+                  AppLocalizations.of(context)!.textEntityCardCopied,
+                ),
               ),
           );
         }
@@ -244,12 +289,8 @@ class _FormattedMessageTextState extends State<FormattedMessageText> {
   @override
   Widget build(BuildContext context) {
     _disposeRecognizers();
-    final ranges = _withAutoLinks();
-    final entities = detectTextEntities(
-      widget.text,
-      skip: _claimedRanges(ranges),
-    );
-    final segments = segmentizeFormats(widget.text, ranges);
+    final entities = _parsed.entities;
+    final segments = _parsed.segments;
     final cs = Theme.of(context).colorScheme;
     final baseColor = widget.style.color ?? cs.onSurface;
     final quoteColor = baseColor.withValues(alpha: 0.85);
@@ -290,21 +331,16 @@ class _FormattedMessageTextState extends State<FormattedMessageText> {
             child: SizedBox(
               width: box,
               height: box,
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  Text(
-                    content,
-                    style: widget.style.copyWith(fontSize: fontSize * 1.15),
-                  ),
-                  LottieImage(
-                    lottieUrl: segment.animojiUrl,
-                    size: box,
-                    memCacheWidth: 120,
-                    shimmer: false,
-                    eager: true,
-                  ),
-                ],
+              child: LottieImage(
+                lottieUrl: segment.animojiUrl,
+                size: box,
+                memCacheWidth: 120,
+                shimmer: false,
+                eager: true,
+                placeholder: Text(
+                  content,
+                  style: widget.style.copyWith(fontSize: fontSize * 1.15),
+                ),
               ),
             ),
           ),

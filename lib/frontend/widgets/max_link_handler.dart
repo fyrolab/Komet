@@ -5,10 +5,11 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../backend/modules/chats.dart';
 import '../../backend/modules/links.dart';
-import '../../core/cache/info_cache.dart';
 import '../../core/links/max_link.dart';
+import '../../core/links/profile_link.dart';
 import '../../core/storage/app_database.dart';
 import '../../core/utils/share_origin.dart';
+import '../../l10n/app_localizations.dart';
 import '../../main.dart';
 import '../screens/chats/chat_screen.dart';
 import '../screens/contacts/open_contact_profile.dart';
@@ -17,8 +18,10 @@ import 'confirm_dialog.dart';
 import 'custom_notification.dart';
 import 'max_link_nav.dart';
 import 'max_route_handler.dart';
+import 'no_chat_access_card.dart';
 import 'swipe_route.dart';
 import 'web_qr_login.dart';
+import '../../core/security/app_lock.dart';
 
 Future<bool> tryHandleMaxLink(BuildContext context, String url) async {
   final link = MaxLink.parse(url);
@@ -60,16 +63,20 @@ Future<ResolvedLink?> _resolve(String url, String baseUrl) async {
   final resolved = await LinkModule.resolve(api, url);
   if (baseUrl == url) return resolved;
   if (resolved is ResolvedChat || resolved is ResolvedUser) return resolved;
+  if (resolved is ResolvedLinkError && resolved.accessDenied) return resolved;
   return LinkModule.resolve(api, baseUrl);
 }
 
 Future<bool> _openContentLink(BuildContext context, MaxContentLink link) async {
-  final resolved = await _resolve(link.url, link.baseUrl);
+  final resolved = await _resolve(link.lookup, link.baseUrl);
   if (!context.mounted) return true;
 
   switch (resolved) {
     case null:
       return false;
+    case ResolvedLinkError(accessDenied: true):
+      await showNoChatAccessCard(context);
+      return true;
     case ResolvedLinkError(:final message):
       showCustomNotification(context, message);
       return true;
@@ -91,7 +98,7 @@ Future<bool> _openWebAppLink(BuildContext context, MaxWebAppLink link) async {
   if (botId == null) {
     final message = resolved is ResolvedLinkError
         ? resolved.message
-        : 'Не удалось открыть приложение';
+        : AppLocalizations.of(context)!.miniAppFailed;
     showCustomNotification(context, message);
     return true;
   }
@@ -115,21 +122,24 @@ Future<int?> _botIdOf(ResolvedLink? resolved) async {
 }
 
 Future<bool> _shareOwnLink(BuildContext context) async {
-  final myId = await currentAccountId();
-  if (myId == 0) return false;
-  final info = await ContactInfoFetch.get(myId);
+  final link = await ownProfileLink();
   if (!context.mounted) return true;
 
-  final link = (info?.raw['link'] as String?)?.trim();
-  if (link == null || link.isEmpty) {
-    showCustomNotification(context, 'У профиля нет публичной ссылки');
+  if (link == null) {
+    showCustomNotification(
+      context,
+      AppLocalizations.of(context)!.maxLinkNoPublicLink,
+    );
     return true;
   }
   try {
-    await Share.share(link, sharePositionOrigin: shareOriginOf(context));
+    await AppLock.instance.external(() => Share.share(link, sharePositionOrigin: shareOriginOf(context)));
   } catch (_) {
     if (context.mounted) {
-      showCustomNotification(context, 'Не удалось поделиться ссылкой');
+      showCustomNotification(
+        context,
+        AppLocalizations.of(context)!.maxLinkShareFailed,
+      );
     }
   }
   return true;
@@ -142,7 +152,10 @@ Future<void> _openContact(
 ) async {
   final id = contact['id'];
   if (id is! int) {
-    showCustomNotification(context, 'Не удалось открыть профиль');
+    showCustomNotification(
+      context,
+      AppLocalizations.of(context)!.maxLinkOpenProfileFailed,
+    );
     return;
   }
 
@@ -157,7 +170,7 @@ Future<void> _openContact(
     openContactDialogProfile(
       context,
       contactId: id,
-      name: _contactName(contact),
+      name: _contactName(context, contact),
       avatarUrl: contact['baseUrl'] as String?,
     ),
   );
@@ -180,7 +193,7 @@ Future<bool> _startBotDialog(
   _openChatAndStartBot(
     context,
     chatId: chatId,
-    name: _contactName(contact),
+    name: _contactName(context, contact),
     imageUrl: (contact['baseUrl'] as String?) ?? '',
     chatType: 'DIALOG',
     startPayload: startPayload,
@@ -217,7 +230,10 @@ Future<void> _openResolvedChat(
   final chat = resolved.chat;
   final id = chat['id'];
   if (id is! int) {
-    showCustomNotification(context, 'Не удалось открыть чат');
+    showCustomNotification(
+      context,
+      AppLocalizations.of(context)!.maxLinkOpenChatFailed,
+    );
     return;
   }
 
@@ -235,12 +251,14 @@ Future<void> _openResolvedChat(
   if (link.kind == MaxContentKind.invite &&
       access == 'PRIVATE' &&
       !isMember) {
-    final label = title.isEmpty ? 'этот чат' : '«$title»';
+    final l10n = AppLocalizations.of(context)!;
     final confirmed = await showConfirmDialog(
       context,
-      title: 'Вступить',
-      message: 'Вступить в $label?',
-      confirmLabel: 'Вступить',
+      title: l10n.chatInfoActionJoin,
+      message: title.isEmpty
+          ? l10n.maxLinkJoinThisChatConfirm
+          : l10n.maxLinkJoinChatConfirm(title),
+      confirmLabel: l10n.chatInfoActionJoin,
     );
     if (!confirmed || !context.mounted) return;
 
@@ -275,7 +293,10 @@ Future<void> _openResolvedChat(
       name: title,
       imageUrl: icon,
       chatType: type,
-      channelSubscribed: type == 'CHANNEL' ? isMember : null,
+      channelSubscribed:
+          (type == 'CHANNEL' || type == 'CHAT' || type == 'GROUP')
+          ? isMember
+          : null,
       initialMessageId: target?.id,
       initialMessageTime: target?.time,
     ),
@@ -293,10 +314,10 @@ Future<void> _openResolvedChat(
   }
   final messageId = link.messageId;
   if (messageId == null) return null;
-  return (id: messageId.toString(), time: null);
+  return (id: messageId.toString(), time: messageIdToTime(messageId));
 }
 
-String _contactName(Map<dynamic, dynamic> contact) {
+String _contactName(BuildContext context, Map<dynamic, dynamic> contact) {
   final names = contact['names'];
   if (names is List && names.isNotEmpty && names.first is Map) {
     final entry = names.first as Map;
@@ -307,5 +328,5 @@ String _contactName(Map<dynamic, dynamic> contact) {
     final joined = '$first $last'.trim();
     if (joined.isNotEmpty) return joined;
   }
-  return 'Профиль';
+  return AppLocalizations.of(context)!.maxLinkProfileFallback;
 }

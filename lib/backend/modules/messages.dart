@@ -7,13 +7,17 @@ import '../../core/config/komet_settings.dart';
 import '../../core/contacts/device_contacts_service.dart';
 import '../../core/protocol/opcode_map.dart';
 import '../../core/protocol/packet.dart';
+import '../../core/crypto/e2ee_service.dart';
 import '../../core/storage/app_database.dart';
+import '../../core/storage/message_ranges.dart';
 import '../../core/storage/token_storage.dart';
 import '../../core/utils/logger.dart';
 import '../../core/utils/text_format.dart';
 import '../../models/attachment.dart';
 import 'chats.dart' show chats;
+import 'message_copy.dart';
 
+// #***! быстрый кэш id -> имя аватарка телефон, из него подписи в пузырях
 class ContactCache {
   static final Map<int, String> _nameCache = {};
   static final Map<int, String> _avatarCache = {};
@@ -24,6 +28,7 @@ class ContactCache {
   static Timer? _saveTimer;
   static bool _loaded = false;
 
+  // #***! поднимается из prefs на старте чтоб имена были сразу
   static Future<void> load() async {
     if (_loaded) return;
     _loaded = true;
@@ -46,6 +51,7 @@ class ContactCache {
     } catch (_) {}
   }
 
+  // #***! запись с отложенным сохранением
   static void put(int id, String name) {
     _nameCache[id] = name;
     _scheduleSave();
@@ -67,6 +73,7 @@ class ContactCache {
     if (phone > 0) _phoneCache[id] = phone;
   }
 
+  // #***! номер есть в телефонной книге, имя оттуда важнее
   static String? get(int id) {
     final phone = _phoneCache[id];
     if (phone != null) {
@@ -99,6 +106,7 @@ class ContactCache {
     unawaited(_wipePersisted());
   }
 
+  // #***! сохранение откладываем, при синхре сюда пишут сотни раз
   static void _scheduleSave() {
     _saveTimer?.cancel();
     _saveTimer = Timer(const Duration(seconds: 3), () => unawaited(_save()));
@@ -131,6 +139,7 @@ class ContactCache {
   }
 }
 
+// #***! результат расшифровки голосового
 class TranscriptionResult {
   final int status;
   final String? text;
@@ -147,6 +156,7 @@ class TranscriptionResult {
   });
 }
 
+// #***! расшифровки в памяти плюс подписчики
 class TranscriptionCache {
   static final Map<String, TranscriptionResult> _cache = {};
   static final Map<String, Set<VoidCallback>> _listeners = {};
@@ -170,6 +180,7 @@ class TranscriptionCache {
 
   static bool has(String messageId) => _cache.containsKey(messageId);
 
+  // #***! развёрнут ли текст под пузырём
   static bool isExpanded(String messageId) => _expanded.contains(messageId);
 
   static void setExpanded(String messageId, bool value) {
@@ -180,6 +191,7 @@ class TranscriptionCache {
     }
   }
 
+  // #***! пузырь подписывается на свою расшифровку
   static void listen(String messageId, VoidCallback listener) {
     _listeners.putIfAbsent(messageId, () => <VoidCallback>{}).add(listener);
   }
@@ -197,6 +209,7 @@ class TranscriptionCache {
   }
 }
 
+// #***! расшифровка пушем, иногда сильно позже
 class TranscriptionPushHandler {
   static StreamSubscription<Packet>? _sub;
 
@@ -225,9 +238,7 @@ class TranscriptionPushHandler {
       messageId,
       TranscriptionResult(
         status: 1,
-        text: (rawText == null || rawText.isEmpty)
-            ? 'не удалось распознать текст'
-            : rawText,
+        text: rawText ?? '',
         messageId: messageId,
         chatId: source['chatId'] as int?,
         mediaId: source['mediaId'] as int?,
@@ -237,6 +248,7 @@ class TranscriptionPushHandler {
   }
 }
 
+// #***! отправленный файл в истории облака
 class FileHistoryEntry {
   final int fileId;
   final String? url;
@@ -278,6 +290,7 @@ class FileHistoryEntry {
   }
 }
 
+// #***! последние 50 файлов, notifier для экрана истории
 class FileHistoryCache {
   static const _prefKey = 'file_history_v1';
   static const _maxEntries = 50;
@@ -334,6 +347,7 @@ class FileHistoryCache {
   }
 }
 
+// #***! адрес и токен для заливки
 class FileUploadInfo {
   final String url;
   final int fileId;
@@ -346,6 +360,7 @@ class FileUploadInfo {
   });
 }
 
+// #***! то же для видео
 class VideoUploadInfo {
   final String url;
   final int videoId;
@@ -358,6 +373,7 @@ class VideoUploadInfo {
   });
 }
 
+// #***! цитата для шапки пузыря
 class ReplyInfo {
   final String? messageId;
   final int senderId;
@@ -373,8 +389,10 @@ class ReplyInfo {
     this.attachments,
   });
 
+  // #***! нет текста и вложений значит сообщение удалили
   bool get missing => previewText().isEmpty;
 
+  // #***! цитата спрятана в link
   static ReplyInfo? fromPayload(Map<String, dynamic>? payload) {
     if (payload == null) return null;
     final link = payload['link'];
@@ -388,14 +406,14 @@ class ReplyInfo {
       return ReplyInfo(messageId: mid.toString(), senderId: 0);
     }
 
-    List<MessageAttachment>? attaches;
-    final raw = msg['attaches'];
-    if (raw is List && raw.isNotEmpty) {
-      attaches = raw
-          .whereType<Map>()
-          .map((a) => MessageAttachment.fromMap(Map<String, dynamic>.from(a)))
-          .toList();
-    }
+    final (parsed, _) = CachedMessage.parseAttachments(
+      Map<String, dynamic>.from(msg),
+    );
+    final forwarded = parsed
+        ?.whereType<ForwardedMessageAttachment>()
+        .firstOrNull;
+    final ownText = msg['text']?.toString();
+    final forwardedAttaches = forwarded?.originalAttachments;
 
     final sender = msg['sender'];
     return ReplyInfo(
@@ -403,12 +421,17 @@ class ReplyInfo {
       senderId: sender is int
           ? sender
           : int.tryParse(sender?.toString() ?? '') ?? 0,
-      text: msg['text']?.toString(),
+      text: ownText != null && ownText.trim().isNotEmpty
+          ? ownText
+          : forwarded?.originalText,
       time: msg['time'] is int ? msg['time'] as int : null,
-      attachments: attaches,
+      attachments: forwardedAttaches != null && forwardedAttaches.isNotEmpty
+          ? forwardedAttaches
+          : (parsed == null || parsed.isEmpty ? null : parsed),
     );
   }
 
+  // #***! короткий текст цитаты
   String previewText() {
     final t = text;
     if (t != null && t.trim().isNotEmpty) return t;
@@ -422,7 +445,9 @@ class ReplyInfo {
         case AttachmentType.audio:
           return 'Голосовое сообщение';
         case AttachmentType.file:
-          return 'Файл';
+          final att = a.first;
+          final name = att is FileAttachment ? att.name?.trim() : null;
+          return name == null || name.isEmpty ? 'Файл' : name;
         case AttachmentType.sticker:
           return 'Стикер';
         case AttachmentType.contact:
@@ -449,6 +474,7 @@ class ReplyInfo {
   }
 }
 
+// #***! то же для голосового
 class AudioUploadInfo {
   final String url;
   final int audioId;
@@ -461,6 +487,10 @@ class AudioUploadInfo {
   });
 }
 
+final Expando<List<FormatRange>> _formatRangesCache =
+    Expando<List<FormatRange>>('formatRanges');
+
+// #***! сообщение как оно в базе, плоские поля плюс сырой payload
 class CachedMessage {
   final String id;
   final int accountId;
@@ -474,7 +504,17 @@ class CachedMessage {
   final bool isControl;
   final bool deleted;
   final List<Map<String, dynamic>>? editHistory;
+  // #***! открытый текст лежит запечатанным локальным ключом
+  final Uint8List? sealedText;
+  final int e2ee;
+  final int? typingMs;
 
+  static const int e2eeNone = 0;
+  static const int e2eeText = 1;
+  static const int e2eeFailed = 2;
+  static const int e2eeFile = 3;
+
+  // #***! дальше удобства для юишки
   const CachedMessage({
     required this.id,
     required this.accountId,
@@ -488,6 +528,9 @@ class CachedMessage {
     this.isControl = false,
     this.deleted = false,
     this.editHistory,
+    this.sealedText,
+    this.e2ee = e2eeNone,
+    this.typingMs,
   });
 
   ControlAttachment? get controlAttachment =>
@@ -511,15 +554,20 @@ class CachedMessage {
     return (payload == null || payload.isEmpty) ? null : payload;
   }
 
+  // #***! нажали начать у бота без параметра, такое не показываем
   bool get isSilentBotStart =>
       (controlAttachment?.isBotStart ?? false) && botStartPayload == null;
 
+  // #***! copyWith для точечных правок
   CachedMessage copyWith({
     String? status,
     bool? deleted,
     List<MessageAttachment>? attachments,
     List<Map<String, dynamic>>? editHistory,
     Map<String, dynamic>? payload,
+    Uint8List? sealedText,
+    int? e2ee,
+    int? typingMs,
   }) => CachedMessage(
     id: id,
     accountId: accountId,
@@ -533,8 +581,15 @@ class CachedMessage {
     isControl: isControl,
     deleted: deleted ?? this.deleted,
     editHistory: editHistory ?? this.editHistory,
+    sealedText: sealedText ?? this.sealedText,
+    e2ee: e2ee ?? this.e2ee,
+    typingMs: typingMs ?? this.typingMs,
   );
 
+  CachedMessage withSendFailure(Object error) =>
+      copyWith(status: isPermanentSendFailure(error) ? 'error' : 'pending');
+
+  // #***! история правок это список прошлых версий текста
   static List<Map<String, dynamic>>? parseEditHistory(dynamic raw) {
     if (raw is! String || raw.isEmpty) return null;
     try {
@@ -565,6 +620,7 @@ class CachedMessage {
     return list;
   }
 
+  // #***! пересланное это одно вложение обёртка
   static (List<MessageAttachment>?, bool) parseAttachments(
     Map<String, dynamic> map,
   ) {
@@ -627,6 +683,11 @@ class CachedMessage {
           ? row['deleted'] == 1
           : row['deleted']?.toString() == '1',
       editHistory: parseEditHistory(row['edit_history']),
+      sealedText: row['text_sealed'] is Uint8List
+          ? row['text_sealed'] as Uint8List
+          : null,
+      e2ee: row['e2ee'] is int ? row['e2ee'] as int : 0,
+      typingMs: row['typing_ms'] is int ? row['typing_ms'] as int : null,
     );
   }
 
@@ -640,13 +701,29 @@ class CachedMessage {
     return null;
   }
 
+  // #***! отложенное, время отправки в будущем
   bool get isDelayed => delayedTimeToFire != null;
 
   ReplyInfo? get replyInfo => ReplyInfo.fromPayload(payload);
 
+  // #***! геттер зовётся на каждую перестройку пузыря, а разбор payload
+  // каждый раз рождал новый список объектов
   List<FormatRange> get formatRanges =>
-      parseFormatElements(payload?['elements']);
+      _formatRangesCache[this] ??= parseFormatElements(payload?['elements']);
 
+  // #***! у своего сообщения до ответа сервера payload'а нет, собираем его
+  // из вложений чтобы превью считал тот же код что и для входящих
+  Map<String, dynamic> get previewPayload =>
+      payload ??
+      {
+        'text': text,
+        'attaches': [
+          for (final attachment in attachments ?? const <MessageAttachment>[])
+            attachment.toMap(),
+        ],
+      };
+
+  // #***! 20+ строк разбираем в изоляте иначе анимация проседает
   static List<CachedMessage> _decodeRows(List<Map<String, dynamic>> rows) =>
       rows.map(CachedMessage.fromDbRow).toList();
 
@@ -659,6 +736,7 @@ class CachedMessage {
     return compute(_decodeRows, rows);
   }
 
+  // #***! обратно в строку таблицы
   Map<String, dynamic> toDbRow() => {
     'id': id,
     'account_id': accountId,
@@ -670,8 +748,12 @@ class CachedMessage {
     'payload': payload != null ? jsonEncode(payload) : null,
     'deleted': deleted ? 1 : 0,
     'edit_history': editHistory != null ? jsonEncode(editHistory) : null,
+    'text_sealed': sealedText,
+    'e2ee': e2ee,
+    'typing_ms': typingMs,
   };
 
+  // #***! сообщение из пуша, разбор тот же
   static CachedMessage fromPushPayload(int accountId, int chatId, Map msg) {
     final full = Map<String, dynamic>.from(msg);
     final parsed = parseAttachments(full);
@@ -690,11 +772,22 @@ class CachedMessage {
   }
 }
 
+// #***! все операции с сообщениями
 class MessagesModule {
+  int get sessionEpoch => _api.sessionEpoch;
   final Api _api;
 
   MessagesModule(this._api);
 
+  static int _lastCid = 0;
+
+  static int _nextCid() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _lastCid = now > _lastCid ? now : _lastCid + 1;
+    return _lastCid;
+  }
+
+  // #***! история с сервера
   Future<List<CachedMessage>> fetchHistory(
     int accountId,
     int chatId, {
@@ -737,21 +830,61 @@ class MessagesModule {
       }
     }
 
-    final toSave = KometSettings.viewRedacted.value && results.isNotEmpty
-        ? await _mergeEditHistory(accountId, chatId, results)
+    final merged = results.isNotEmpty
+        ? await _mergeLocalFields(accountId, chatId, results)
         : results;
+    final toSave = await E2eeService.instance.inspectHistory(
+      accountId,
+      chatId,
+      merged,
+    );
 
     if (toSave.isNotEmpty) {
       try {
         await AppDatabase.saveMessages(toSave.map((m) => m.toDbRow()).toList());
       } catch (e) {
         logger.e('saveMessages error: $e');
+        return toSave;
       }
     }
 
+    await _recordCoverage(
+      accountId,
+      chatId,
+      fromTime: fromTime,
+      forward: forward,
+      backward: backward ?? count,
+      messagesData: messagesData,
+    );
     return toSave;
   }
 
+  Future<void> _recordCoverage(
+    int accountId,
+    int chatId, {
+    required int? fromTime,
+    required int forward,
+    required int backward,
+    required List<dynamic> messagesData,
+  }) async {
+    final range = MessageRanges.coverageOfFetch(
+      fromTime: fromTime,
+      forward: forward,
+      backward: backward,
+      times: [
+        for (final m in messagesData)
+          if (m is Map && m['time'] is int) m['time'] as int,
+      ],
+    );
+    if (range == null) return;
+    try {
+      await AppDatabase.addMessageRange(accountId, chatId, range);
+    } catch (e) {
+      logger.w('addMessageRange error: $e');
+    }
+  }
+
+  // #***! поиск по сообщениям чата
   Future<List<Map<String, dynamic>>> searchMessages(
     int chatId,
     String query, {
@@ -777,7 +910,8 @@ class MessagesModule {
         .toList();
   }
 
-  Future<List<CachedMessage>> _mergeEditHistory(
+  // #***! подмешиваем свою историю правок, сервер её не отдаёт
+  Future<List<CachedMessage>> _mergeLocalFields(
     int accountId,
     int chatId,
     List<CachedMessage> serverMessages,
@@ -803,16 +937,24 @@ class MessagesModule {
       }
       var history = CachedMessage.parseEditHistory(existing['edit_history']);
       final oldText = existing['text']?.toString();
-      if ((oldText ?? '') != (msg.text ?? '') &&
+      if (KometSettings.viewRedacted.value &&
+          (oldText ?? '') != (msg.text ?? '') &&
           oldText != null &&
           oldText.isNotEmpty) {
         history = CachedMessage.appendEditHistory(history, oldText, now);
       }
-      out.add(history == null ? msg : msg.copyWith(editHistory: history));
+      final typingMs = existing['typing_ms'];
+      out.add(
+        msg.copyWith(
+          editHistory: history,
+          typingMs: typingMs is int ? typingMs : null,
+        ),
+      );
     }
     return out;
   }
 
+  // #***! история из базы, рисуется мгновенно до ответа сервера
   Future<List<CachedMessage>> getLocalHistory(
     int accountId,
     int chatId, {
@@ -860,6 +1002,7 @@ class MessagesModule {
     return int.tryParse(value.toString()) ?? 0;
   }
 
+  // #***! отправка текста, cid спасает от дублей
   Future<String> sendMessage(
     int accountId,
     int chatId,
@@ -869,10 +1012,11 @@ class MessagesModule {
     int? replyToMessageId,
     int? replySourceChatId,
     List<Map<String, dynamic>> elements = const [],
+    void Function()? beforeSend,
   }) async {
     final message = <String, dynamic>{
       'text': text,
-      'cid': DateTime.now().millisecondsSinceEpoch * -1,
+      'cid': -_nextCid(),
       'elements': elements,
       'attaches': [],
     };
@@ -891,9 +1035,14 @@ class MessagesModule {
     }
     final payload = {'chatId': chatId, 'message': message, 'notify': notify};
 
-    return _sendAndExtractMessageId(payload, 'Ошибка отправки');
+    return _sendAndExtractMessageId(
+      payload,
+      'Ошибка отправки',
+      beforeSend: beforeSend,
+    );
   }
 
+  // #***! системное сообщение
   Future<Packet> sendControlMessage(
     int chatId,
     Map<String, dynamic> control, {
@@ -902,7 +1051,7 @@ class MessagesModule {
     final payload = {
       'chatId': chatId,
       'message': {
-        'cid': DateTime.now().millisecondsSinceEpoch * -1,
+        'cid': -_nextCid(),
         'text': '',
         'attaches': [control],
       },
@@ -912,18 +1061,18 @@ class MessagesModule {
   }
 
   Future<Map<String, dynamic>?> sendBotStart(
-    int chatId,
-    String startPayload,
-  ) async {
+    int chatId, [
+    String? startPayload,
+  ]) async {
     final response = await _api.sendRequest(Opcode.msgSend, {
       'chatId': chatId,
       'message': {
-        'cid': DateTime.now().millisecondsSinceEpoch * -1,
+        'cid': -_nextCid(),
         'attaches': [
           {
             '_type': 'CONTROL',
             'event': ControlAttachment.botStartedEvent,
-            'startPayload': startPayload,
+            'startPayload': ?startPayload,
           },
         ],
       },
@@ -931,11 +1080,17 @@ class MessagesModule {
     return _sentMessageMap(response);
   }
 
+  // #***! разбор ответа отправки, достаём id от сервера
   Future<String> _sendAndExtractMessageId(
     Map<String, dynamic> payload,
-    String defaultError,
-  ) async {
-    final response = await _api.sendRequest(Opcode.msgSend, payload);
+    String defaultError, {
+    void Function()? beforeSend,
+  }) async {
+    final response = await _api.sendRequest(
+      Opcode.msgSend,
+      payload,
+      beforeSend: beforeSend,
+    );
     if (!response.isOk) {
       _throwSendError(response.payload, defaultError);
     }
@@ -967,6 +1122,7 @@ class MessagesModule {
     return null;
   }
 
+  // #***! not.ready значит сервер ещё готовит чат, повторяем
   Future<T> _sendWithNotReadyRetry<T>({
     required Map<String, dynamic> payload,
     required int maxAttempts,
@@ -990,18 +1146,20 @@ class MessagesModule {
     return onExhausted;
   }
 
+  // #***! пересылка
   Future<String> forwardMessage(
     int targetChatId,
     int sourceChatId,
     int messageId, {
     bool notify = true,
+    void Function()? beforeSend,
   }) async {
     final message = <String, dynamic>{
       'isLive': false,
       'detectShare': false,
       'elements': [],
       'attaches': [],
-      'cid': DateTime.now().millisecondsSinceEpoch * -1,
+      'cid': -_nextCid(),
       'link': {
         'type': 'FORWARD',
         'chatId': sourceChatId,
@@ -1014,9 +1172,35 @@ class MessagesModule {
       'notify': notify,
     };
 
-    return _sendAndExtractMessageId(payload, 'Ошибка пересылки');
+    return _sendAndExtractMessageId(
+      payload,
+      'Ошибка пересылки',
+      beforeSend: beforeSend,
+    );
   }
 
+  Future<Map<String, dynamic>> sendMessageCopy(
+    int chatId,
+    MessageCopy copy, {
+    bool notify = true,
+    void Function()? beforeSend,
+  }) async {
+    final response = await _api.sendRequest(Opcode.msgSend, {
+      'chatId': chatId,
+      'message': {
+        'cid': -_nextCid(),
+        if (copy.text.isNotEmpty) 'text': copy.text,
+        'elements': copy.elements,
+        'attaches': copy.wireAttaches,
+      },
+      'notify': notify,
+    }, beforeSend: beforeSend);
+    final sent = _sentMessageMap(response);
+    if (sent == null) _throwSendError(response.payload, 'Ошибка пересылки');
+    return sent;
+  }
+
+  // #***! локальная копия чтоб пересланное появилось сразу
   static CachedMessage buildForwardMessage({
     required int myId,
     required int targetChatId,
@@ -1089,6 +1273,7 @@ class MessagesModule {
     );
   }
 
+  // #***! меняем временный id на настоящий
   static CachedMessage reidentifyMessage(
     CachedMessage message,
     String newId, {
@@ -1106,6 +1291,7 @@ class MessagesModule {
     isControl: message.isControl,
     deleted: message.deleted,
     editHistory: message.editHistory,
+    typingMs: message.typingMs,
   );
 
   static String forwardPreviewText(CachedMessage message) {
@@ -1118,10 +1304,11 @@ class MessagesModule {
     return 'Пересланное сообщение';
   }
 
+  // #***! ссылку шлём отдельно ради превью
   Future<bool> sendLinkMessage(int chatId, String url) async {
     final message = <String, dynamic>{
       'text': url,
-      'cid': DateTime.now().millisecondsSinceEpoch * -1,
+      'cid': -_nextCid(),
       'elements': [
         {
           'type': 'LINK',
@@ -1139,6 +1326,7 @@ class MessagesModule {
     });
   }
 
+  // #***! отложенные сообщения
   Future<List<CachedMessage>> fetchDelayedMessages(
     int accountId,
     int chatId,
@@ -1181,6 +1369,7 @@ class MessagesModule {
     return results;
   }
 
+  // #***! редактирование
   Future<bool> editMessage(
     int chatId,
     String messageId, {
@@ -1222,6 +1411,7 @@ class MessagesModule {
     return _api.sendRequestOk(Opcode.msgEdit, payload);
   }
 
+  // #***! удаление, deleteForAll значит у всех
   Future<bool> deleteMessages(
     int chatId,
     List<String> messageIds, {
@@ -1244,6 +1434,7 @@ class MessagesModule {
     return _api.sendRequestOk(Opcode.msgDelete, payload);
   }
 
+  // #***! поставить реакцию
   Future<({bool ok, Map<String, dynamic>? info})> setReaction(
     int chatId,
     String messageId,
@@ -1259,6 +1450,7 @@ class MessagesModule {
     return _applyReactionResponse(chatId, messageId, response);
   }
 
+  // #***! снять реакцию
   Future<({bool ok, Map<String, dynamic>? info})> cancelReaction(
     int chatId,
     String messageId,
@@ -1272,6 +1464,7 @@ class MessagesModule {
     return _applyReactionResponse(chatId, messageId, response);
   }
 
+  // #***! кто какую реакцию поставил
   Future<Map<int, String>> getDetailedReactions(
     int chatId,
     String messageId, {
@@ -1308,6 +1501,7 @@ class MessagesModule {
     return result;
   }
 
+  // #***! общий разбор ответа по реакциям
   Future<({bool ok, Map<String, dynamic>? info})> _applyReactionResponse(
     int chatId,
     String messageId,
@@ -1320,7 +1514,9 @@ class MessagesModule {
         : null;
     try {
       await _persistReaction(chatId, messageId, info);
-    } catch (_) {}
+    } catch (e) {
+      logger.w('Реакция на $messageId не сохранилась: $e');
+    }
     return (ok: true, info: info);
   }
 
@@ -1348,6 +1544,7 @@ class MessagesModule {
     };
   }
 
+  // #***! новые реакции сохраняем в payload в базе
   Future<void> _persistReaction(
     int chatId,
     String messageId,
@@ -1385,6 +1582,7 @@ class MessagesModule {
     await AppDatabase.saveMessages([newRow]);
   }
 
+  // #***! нажали кнопку инлайн клавиатуры
   Future<Map<String, dynamic>?> sendButtonCallback({
     required int chatId,
     required String messageId,
@@ -1407,6 +1605,7 @@ class MessagesModule {
     return data is Map ? Map<String, dynamic>.from(data) : null;
   }
 
+  // #***! запрос расшифровки, результат придёт пушем
   Future<TranscriptionResult> requestTranscription(
     int chatId,
     int messageId,
@@ -1426,19 +1625,16 @@ class MessagesModule {
 
     final transcriptionStatus = data['transcriptionStatus'] as int? ?? -1;
     if (transcriptionStatus == 1) {
-      final text = data['transcription'] as String? ?? '';
-      if (text.isEmpty) {
-        return TranscriptionResult(
-          status: 1,
-          text: 'не удалось распознать текст',
-        );
-      }
-      return TranscriptionResult(status: 1, text: text);
+      return TranscriptionResult(
+        status: 1,
+        text: data['transcription'] as String? ?? '',
+      );
     }
 
     return TranscriptionResult(status: transcriptionStatus);
   }
 
+  // #***! дальше пары запросить адрес и отправить, на каждый тип медиа
   Future<FileUploadInfo?> requestUploadUrl({int count = 1}) async {
     final payload = {'count': count};
     final response = await _api.sendRequest(Opcode.fileUpload, payload);
@@ -1467,6 +1663,7 @@ class MessagesModule {
     int chatId,
     int fileId, {
     String? token,
+    String? text,
     bool notify = true,
     int? scheduledTime,
     int maxAttempts = 20,
@@ -1476,7 +1673,7 @@ class MessagesModule {
       'isLive': false,
       'detectShare': false,
       'elements': <dynamic>[],
-      'cid': DateTime.now().millisecondsSinceEpoch,
+      'cid': _nextCid(),
       'attaches': [
         if (token != null)
           {'_type': 'FILE', 'token': token}
@@ -1484,6 +1681,7 @@ class MessagesModule {
           {'_type': 'FILE', 'fileId': fileId},
       ],
     };
+    if (text != null && text.isNotEmpty) message['text'] = text;
     if (scheduledTime != null) {
       message['delayedAttributes'] = {
         'timeToFire': scheduledTime,
@@ -1522,7 +1720,7 @@ class MessagesModule {
     Duration retryDelay = const Duration(seconds: 1),
   }) async {
     final message = <String, dynamic>{
-      'cid': DateTime.now().millisecondsSinceEpoch * -1,
+      'cid': -_nextCid(),
       'attaches': [
         for (final token in photoTokens)
           {'_type': 'PHOTO', 'photoToken': token},
@@ -1583,7 +1781,7 @@ class MessagesModule {
       'isLive': false,
       'detectShare': false,
       'elements': <dynamic>[],
-      'cid': DateTime.now().millisecondsSinceEpoch * -1,
+      'cid': -_nextCid(),
       'attaches': [
         {'videoType': 0, '_type': 'VIDEO', 'token': token},
       ],
@@ -1644,7 +1842,7 @@ class MessagesModule {
       'isLive': false,
       'detectShare': false,
       'elements': <dynamic>[],
-      'cid': DateTime.now().millisecondsSinceEpoch * -1,
+      'cid': -_nextCid(),
       'attaches': [
         {
           'duration': duration,
@@ -1709,7 +1907,7 @@ class MessagesModule {
       'isLive': false,
       'detectShare': false,
       'elements': <dynamic>[],
-      'cid': DateTime.now().millisecondsSinceEpoch * -1,
+      'cid': -_nextCid(),
       'attaches': [
         {
           'duration': duration,
@@ -1742,7 +1940,7 @@ class MessagesModule {
     final payload = {
       'chatId': chatId,
       'message': {
-        'cid': DateTime.now().millisecondsSinceEpoch * -1,
+        'cid': -_nextCid(),
         'attaches': [
           {
             '_type': 'LOCATION',
@@ -1767,7 +1965,7 @@ class MessagesModule {
     final payload = {
       'chatId': chatId,
       'message': {
-        'cid': DateTime.now().millisecondsSinceEpoch * -1,
+        'cid': -_nextCid(),
         'attaches': [
           {'_type': 'CONTACT', 'contactId': contactId},
         ],
@@ -1796,7 +1994,7 @@ class MessagesModule {
     final payload = {
       'chatId': chatId,
       'message': {
-        'cid': DateTime.now().millisecondsSinceEpoch * -1,
+        'cid': -_nextCid(),
         'attaches': [
           {
             '_type': 'POLL',
@@ -1815,6 +2013,7 @@ class MessagesModule {
     return _sentMessageMap(response);
   }
 
+  // #***! печатает и записывает, ответ не ждём
   void sendTyping(int chatId, String type) {
     unawaited(() async {
       try {
@@ -1834,7 +2033,7 @@ class MessagesModule {
     final payload = {
       'chatId': chatId,
       'message': {
-        'cid': DateTime.now().millisecondsSinceEpoch * -1,
+        'cid': -_nextCid(),
         'attaches': [
           {'_type': 'STICKER', 'stickerId': stickerId},
         ],
@@ -1846,6 +2045,7 @@ class MessagesModule {
     return _sentMessageMap(response);
   }
 
+  // #***! дальше ссылки и скачивание медиа по токенам
   Future<Uint8List?> downloadPhoto(String baseUrl, String photoToken) async {
     try {
       final response = await _api.sendRequest(Opcode.fileDownload, {
@@ -1883,6 +2083,7 @@ class MessagesModule {
     }
   }
 
+  // #***! у видео несколько качеств, отдаём картой
   Future<Map<String, String>> getVideoSources({
     required String messageId,
     required int chatId,
@@ -1896,7 +2097,10 @@ class MessagesModule {
         'token': token,
         'videoId': videoId,
       });
-      if (!response.isOk) return const {};
+      if (!response.isOk) {
+        logger.w('getVideoSources $videoId: ${response.payload}');
+        return const {};
+      }
       final data = response.payload;
       if (data is! Map) return const {};
 
@@ -1921,8 +2125,12 @@ class MessagesModule {
           sources['Источник'] = external;
         }
       }
+      if (sources.isEmpty) {
+        logger.w('getVideoSources $videoId: сервер не отдал ссылок: $data');
+      }
       return sources;
-    } catch (_) {
+    } catch (e) {
+      logger.w('getVideoSources $videoId: $e');
       return const {};
     }
   }
@@ -2005,6 +2213,7 @@ class MessagesModule {
     }
   }
 
+  // #***! поиск контакта по id когда его нигде нет
   Future<String?> searchContactById(int contactId) async {
     final cached = ContactCache.get(contactId);
     if (cached != null) return cached;
@@ -2058,6 +2267,7 @@ class MessagesModule {
     return null;
   }
 
+  // #***! догружаем недостающие имена перед отрисовкой
   Future<bool> ensureContactNames(Iterable<int> ids) async {
     final missing = ids
         .where((id) => id != 0 && ContactCache.get(id) == null)

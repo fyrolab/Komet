@@ -23,9 +23,8 @@ import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import io.flutter.embedding.android.FlutterActivity
+import com.ryanheise.audioservice.AudioServiceFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -50,7 +49,7 @@ import java.util.Collections
 import java.util.Random
 import java.util.concurrent.atomic.AtomicBoolean
 
-class MainActivity : FlutterActivity() {
+class MainActivity : AudioServiceFragmentActivity() {
 
     private val channelName = "ru.komet.app/vpn_bypass"
     private val iconPackage = MainActivity::class.java.name.substringBeforeLast('.')
@@ -89,7 +88,6 @@ class MainActivity : FlutterActivity() {
         const val LOG_TAG = "VpnBypass"
         const val SHARE_TAG = "ShareIntake"
         const val NFC_TAG = "NfcExchange"
-        const val KEEP_ENGINE_ID = "komet_keep_engine"
         const val NFC_PHASE_MIN_MS = 350L
         const val NFC_PHASE_JITTER_MS = 400
         const val BLE_PERMS_REQUEST = 7711
@@ -114,6 +112,7 @@ class MainActivity : FlutterActivity() {
                 PackageManager.DONT_KILL_APP,
             )
         }
+        iconComponents[name]?.let { LauncherBadge.reapply(this, it) }
         Handler(Looper.getMainLooper()).postDelayed({
             finishAndRemoveTask()
         }, 250L)
@@ -254,6 +253,7 @@ class MainActivity : FlutterActivity() {
                 "permission" -> requestNotePermissions(result)
                 "init" -> {
                     val front = call.argument<Boolean>("front") ?: true
+                    val cameraId = call.argument<String>("cameraId")
                     val size = call.argument<Int>("size") ?: 480
                     val fps = call.argument<Int>("fps") ?: 30
                     val rec = VideoNoteRecorder(
@@ -264,11 +264,12 @@ class MainActivity : FlutterActivity() {
                     )
                     noteRecorder?.dispose()
                     noteRecorder = rec
-                    rec.init(front, result)
+                    rec.init(front, cameraId, result)
                 }
                 "start" -> noteRecorder?.start(result)
                     ?: result.error("NOT_READY", "recorder not initialized", null)
                 "switch" -> noteRecorder?.switchCamera(result)
+                    ?: result.error("NOT_READY", "recorder not initialized", null)
                 "torch" -> noteRecorder?.setTorch(
                     call.argument<Boolean>("on") ?: false,
                     result,
@@ -437,7 +438,7 @@ class MainActivity : FlutterActivity() {
                     stashChatOpen(intent, emit = false)
                     val chatId = pendingChat
                     pendingChat = 0L
-                    result.success(if (chatId > 0L) chatId else null)
+                    result.success(if (chatId != 0L) chatId else null)
                 }
                 "setActiveChat" -> {
                     ChatNotifications.activeChatId = longArg(call.argument<Any>("chatId"))
@@ -446,6 +447,15 @@ class MainActivity : FlutterActivity() {
                 "clearActiveChat" -> {
                     ChatNotifications.activeChatId = 0L
                     result.success(null)
+                }
+                "cancelChat" -> {
+                    KometNotifier(applicationContext).cancelChat(
+                        longArg(call.argument<Any>("chatId")),
+                    )
+                    result.success(null)
+                }
+                "notifiedChats" -> {
+                    result.success(KometNotifier(applicationContext).notifiedChats())
                 }
                 else -> result.notImplemented()
             }
@@ -512,13 +522,24 @@ class MainActivity : FlutterActivity() {
             }
         })
 
+        ClipboardMedia.attach(flutterEngine, this)
+
+        MediaExport.attach(flutterEngine, this)
+
         FkmChannel.attach(flutterEngine, this)
+        LauncherBadge.attach(flutterEngine, this)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        MediaExport.onActivityResult(this, requestCode, resultCode, data)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         if (intent?.hasExtra(CallConst.EXTRA_CALL) == true) applyCallWindowFlags()
         super.onCreate(savedInstanceState)
         applyKeepAwake()
+        requestHighRefreshRate()
         intent?.let { if (it.hasExtra(CallConst.EXTRA_CALL)) stashCall(it, emit = false) }
         stashChatOpen(intent, emit = false)
         stashShare(intent, emit = false)
@@ -539,6 +560,9 @@ class MainActivity : FlutterActivity() {
         val chatId = ChatNotifications.chatIdFrom(source)
         if (chatId == 0L) return
         source?.removeExtra(ChatNotifications.EXTRA_CHAT)
+        val fromRecents =
+            (source?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+        if (fromRecents) return
         val sink = ChatNotifications.sink
         if (emit && sink != null) {
             sink.success(chatId)
@@ -631,6 +655,25 @@ class MainActivity : FlutterActivity() {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    private fun requestHighRefreshRate() {
+        val screen = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay
+        } ?: return
+        val current = screen.mode
+        val fastest = screen.supportedModes
+            .filter {
+                it.physicalWidth == current.physicalWidth &&
+                    it.physicalHeight == current.physicalHeight
+            }
+            .maxByOrNull { it.refreshRate } ?: return
+        window.attributes = window.attributes.apply {
+            preferredDisplayModeId = fastest.modeId
         }
     }
 
@@ -941,33 +984,22 @@ class MainActivity : FlutterActivity() {
     // в обоих случаях в фоне должно жить то же соединение, что и в UI.
     private fun keepEngineAlive(): Boolean = CallState.inCall || FkmState.enabled
 
-    override fun provideFlutterEngine(context: Context): FlutterEngine? {
-        val cache = FlutterEngineCache.getInstance()
-        val cached = cache.get(KEEP_ENGINE_ID)
-        if (cached != null) {
-            if (keepEngineAlive()) return cached
-            cache.remove(KEEP_ENGINE_ID)
-            cached.destroy()
-        }
-        return super.provideFlutterEngine(context)
-    }
-
-    override fun shouldDestroyEngineWithHost(): Boolean = !keepEngineAlive()
+    // Движок общий с audio_service (AudioServiceFragmentActivity.getCachedEngineId), и
+    // уничтожает его AudioServicePlugin.disposeFlutterEngine, когда останавливается
+    // медиа-сервис. Активити не должна рвать его из-под сервиса.
+    override fun shouldDestroyEngineWithHost(): Boolean = false
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         if (!keepEngineAlive()) {
-            FlutterEngineCache.getInstance().remove(KEEP_ENGINE_ID)
             FkmChannel.detach()
+            LauncherBadge.detach()
+            ChatNotifications.activeChatId = 0L
         }
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
     override fun onDestroy() {
         shareExecutor.shutdown()
-        if (keepEngineAlive() && isFinishing) {
-            Log.d("KometFcm", "task removed, caching engine (call=${CallState.inCall} fkm=${FkmState.enabled})")
-            flutterEngine?.let { FlutterEngineCache.getInstance().put(KEEP_ENGINE_ID, it) }
-        }
         super.onDestroy()
     }
 

@@ -5,6 +5,7 @@ import '../../../core/protocol/packet.dart';
 import '../../../l10n/app_localizations.dart';
 import '../../../main.dart';
 import '../../widgets/animated_slash_icon.dart';
+import '../../widgets/auth_limits_sheet.dart';
 import '../../widgets/custom_notification.dart';
 import '../../widgets/login_success_screen.dart';
 import '../../widgets/small_spinner.dart';
@@ -13,8 +14,15 @@ import 'session_stale_recovery.dart';
 class Password2FAScreen extends StatefulWidget {
   final String trackId;
   final String? hint;
+  // #***! нужен для эксперим. SMS-входа через веб (запрос кода на сокете)
+  final String? rawPhone;
 
-  const Password2FAScreen({super.key, required this.trackId, this.hint});
+  const Password2FAScreen({
+    super.key,
+    required this.trackId,
+    this.hint,
+    this.rawPhone,
+  });
 
   @override
   State<Password2FAScreen> createState() => _Password2FAScreenState();
@@ -27,7 +35,8 @@ class _Password2FAScreenState extends State<Password2FAScreen>
   bool _isLoading = false;
 
   @override
-  String get connectionDroppedMessage => 'Соединение прервалось…';
+  String get connectionDroppedMessage =>
+      AppLocalizations.of(context)!.password2faConnectionDropped;
 
   @override
   void initState() {
@@ -46,7 +55,10 @@ class _Password2FAScreenState extends State<Password2FAScreen>
   void recoverStaleSession() {
     if (recovering || !mounted) return;
     recovering = true;
-    showCustomNotification(context, 'Соединение прервалось — войдите заново');
+    showCustomNotification(
+      context,
+      AppLocalizations.of(context)!.password2faConnectionDroppedRelogin,
+    );
     Navigator.of(context).pop();
   }
 
@@ -72,17 +84,32 @@ class _Password2FAScreenState extends State<Password2FAScreen>
 
       if (!mounted) return;
 
-      final loginResult = await accountModule.login(
-        accountId: result.accountId,
-        token: result.loginToken,
-      );
+      String? avatarUrl;
+      // #***! эксперим. SMS-вход через веб: пароль пользователя уже есть, добываем
+      // сокетовый токен и перезаходим боевой версией
+      if (api.webHandshake && widget.rawPhone != null) {
+        stopSessionRecovery();
+        await accountModule.completeWebSmsSocketLogin(
+          phone: widget.rawPhone!,
+          accountId: result.accountId,
+          webToken: result.loginToken,
+          existingPassword: _passwordController.text,
+        );
+      } else {
+        final loginResult = await accountModule.login(
+          accountId: result.accountId,
+          token: result.loginToken,
+        );
+        avatarUrl = loginResult.profile.baseUrl;
+      }
 
       if (!mounted) return;
 
-      final avatar = await precacheLoginAvatar(
-        context,
-        loginResult.profile.baseUrl,
-      );
+      final avatar = await precacheLoginAvatar(context, avatarUrl);
+
+      if (!mounted) return;
+
+      await markAuthLimitsPending(AuthEntry.login);
 
       if (!mounted) return;
 
@@ -117,6 +144,7 @@ class _Password2FAScreenState extends State<Password2FAScreen>
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     return Scaffold(
       backgroundColor: cs.surface,
       appBar: AppBar(
@@ -135,7 +163,7 @@ class _Password2FAScreenState extends State<Password2FAScreen>
             children: [
               const SizedBox(height: 16),
               Text(
-                'Двухфакторная аутентификация',
+                l10n.passwordEntry2faSubtitle,
                 style: TextStyle(
                   color: cs.onSurface,
                   fontSize: 22,
@@ -144,7 +172,7 @@ class _Password2FAScreenState extends State<Password2FAScreen>
               ),
               const SizedBox(height: 12),
               Text(
-                'Введите пароль для завершения входа',
+                l10n.password2faEnterPassword,
                 style: TextStyle(
                   color: cs.outline,
                   fontSize: 15,
@@ -155,7 +183,7 @@ class _Password2FAScreenState extends State<Password2FAScreen>
               if (widget.hint != null) ...[
                 const SizedBox(height: 8),
                 Text(
-                  'Подсказка: ${widget.hint}',
+                  l10n.passwordEntryHintPrefix(widget.hint ?? ''),
                   style: TextStyle(
                     color: cs.tertiary,
                     fontSize: 14,
@@ -170,7 +198,7 @@ class _Password2FAScreenState extends State<Password2FAScreen>
                 autofocus: true,
                 enabled: !_isLoading,
                 decoration: InputDecoration(
-                  hintText: 'Пароль',
+                  hintText: l10n.passwordEntryGenericPasswordHint,
                   filled: true,
                   fillColor: cs.surfaceContainerHigh,
                   border: OutlineInputBorder(

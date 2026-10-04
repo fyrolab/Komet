@@ -9,7 +9,8 @@ pub(crate) fn input(directory: &Path, files: Vec<SharedFile>) -> Input {
             "instance_id": "synthetic-instance", "app_version": "1.0", "build_number": 1,
             "device_type": "IOS", "os_version": "18.0", "timezone": "UTC", "screen": "390x844",
             "push_device_type": "APNS", "arch": "arm64", "locale": "ru", "device_name": "Synthetic Phone",
-            "device_locale": "ru_RU", "client_session_id": 321, "ping_interactive": true
+            "device_locale": "ru_RU", "client_session_id": 321, "ping_interactive": true,
+            "fingerprint_digests": {"signature": "010203", "dex": "040506", "so": "070809"}
         },
         "login": {"chatCacheFingerprint": "stale", "exp": {"chatsCountGroups": {"$bin": "CzI="}}},
         "request": {"id": "synthetic-request", "chat_id": "456", "files": files,

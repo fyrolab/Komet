@@ -2,6 +2,7 @@ import '../api.dart';
 import '../../core/protocol/opcode_map.dart';
 import '../../core/protocol/packet.dart';
 
+// #***! причина жалобы из справочника
 class ComplaintReason {
   final int reasonId;
   final String reasonTitle;
@@ -9,13 +10,17 @@ class ComplaintReason {
   const ComplaintReason({required this.reasonId, required this.reasonTitle});
 }
 
+// #***! жалобы на юзеров и сообщения
 class ComplaintsModule {
+  static const int channelTypeId = 2;
   static const int userTypeId = 6;
 
+  // #***! справочник в рамках сессии не меняется, держим в памяти
   static Map<int, List<ComplaintReason>>? _cache;
 
   static void clear() => _cache = null;
 
+  // #***! причины по typeId, свой набор для юзера чата сообщения
   static Future<Map<int, List<ComplaintReason>>> fetchReasons(Api api) async {
     final cached = _cache;
     if (cached != null) return cached;
@@ -58,6 +63,7 @@ class ComplaintsModule {
     return map;
   }
 
+  // #***! тип незнакомый, отдаём первый непустой чтоб диалог не был пустым
   static Future<List<ComplaintReason>> reasonsFor(Api api, int typeId) async {
     final map = await fetchReasons(api);
     final forType = map[typeId];
@@ -68,6 +74,33 @@ class ComplaintsModule {
     return const [];
   }
 
+  /// COMPLAIN payload. `parentId` is sent only when given (the chat of a
+  /// reported message); a whole channel goes without it.
+  static Map<String, dynamic> complaintPayload({
+    required int reasonId,
+    required int typeId,
+    required List<int> ids,
+    int? parentId,
+  }) => {
+    'reasonId': reasonId,
+    'typeId': typeId,
+    'ids': ids,
+    'parentId': ?parentId,
+  };
+
+  // #***! жалоба на канал целиком: typeId 2, в ids id чата, без parentId
+  static Future<bool> sendChannelComplaint(
+    Api api, {
+    required int chatId,
+    required int reasonId,
+  }) => sendComplaint(
+    api,
+    reasonId: reasonId,
+    typeId: channelTypeId,
+    ids: [chatId],
+  );
+
+  // #***! silent, текст ошибки покажем сами в диалоге
   static Future<bool> sendComplaint(
     Api api, {
     required int reasonId,
@@ -77,12 +110,16 @@ class ComplaintsModule {
   }) async {
     final Packet response;
     try {
-      response = await api.sendRequest(Opcode.complain, {
-        'reasonId': reasonId,
-        'typeId': typeId,
-        'ids': ids,
-        'parentId': ?parentId,
-      }, silent: true);
+      response = await api.sendRequest(
+        Opcode.complain,
+        complaintPayload(
+          reasonId: reasonId,
+          typeId: typeId,
+          ids: ids,
+          parentId: parentId,
+        ),
+        silent: true,
+      );
     } catch (_) {
       return false;
     }

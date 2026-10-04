@@ -1,7 +1,9 @@
 import 'dart:io';
 
+// #***! как показать файл, фото видео или документ
 enum SharedFileKind { photo, video, file }
 
+// #***! файл прилетевший через системное поделиться
 class SharedFile {
   final String path;
   final String name;
@@ -15,6 +17,7 @@ class SharedFile {
     required this.size,
   });
 
+  // #***! путь обязателен, остальное добираем
   static SharedFile? fromMap(Map<dynamic, dynamic> map) {
     final path = map['path'];
     if (path is! String || path.isEmpty) return null;
@@ -33,6 +36,7 @@ class SharedFile {
 
   File get file => File(path);
 
+  // #***! тип по mime, svg это документ
   SharedFileKind get kind {
     final type = mime.split(';').first.trim().toLowerCase();
     if (type.startsWith('image/') && !type.contains('svg')) {
@@ -78,6 +82,7 @@ class SharedFile {
   }
 }
 
+// #***! весь пакет шаринга, файлы и текст
 class SharedPayload {
   final List<SharedFile> files;
   final String? text;
@@ -85,6 +90,7 @@ class SharedPayload {
 
   const SharedPayload({this.files = const [], this.text, this.subject});
 
+  // #***! нет файла на диске выкидываем, иначе упадём позже
   static SharedPayload? fromMap(Object? raw) {
     if (raw is! Map) return null;
     final rawFiles = raw['files'];
@@ -108,6 +114,7 @@ class SharedPayload {
     return payload.isEmpty ? null : payload;
   }
 
+  // #***! пустой пакет юишке не нужен
   bool get isEmpty => files.isEmpty && text == null;
 
   bool get isTextOnly => files.isEmpty && text != null;
@@ -121,6 +128,7 @@ class SharedPayload {
   List<SharedFile> get documents =>
       files.where((f) => f.kind == SharedFileKind.file).toList();
 
+  // #***! по главному типу выбираем экран
   SharedFileKind? get dominantKind {
     if (files.isEmpty) return null;
     if (documents.isNotEmpty) return SharedFileKind.file;

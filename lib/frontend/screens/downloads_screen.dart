@@ -7,7 +7,10 @@ import 'package:open_filex/open_filex.dart';
 import 'package:path/path.dart' as p;
 
 import '../../core/utils/download_history.dart';
+import '../../core/media/audio_file_track.dart';
+import '../../core/media/media_playback.dart';
 import '../../core/utils/format.dart';
+import '../../core/utils/media_saver.dart';
 import '../../core/utils/save_file_as.dart';
 import '../../l10n/app_localizations.dart';
 import '../widgets/chat_menu_overlay.dart';
@@ -15,6 +18,7 @@ import '../widgets/confirm_dialog.dart';
 import '../widgets/custom_notification.dart';
 import '../widgets/small_spinner.dart';
 import '../widgets/sheet_helpers.dart';
+import '../widgets/share_unopenable_file.dart';
 
 class DownloadsScreen extends StatefulWidget {
   const DownloadsScreen({super.key});
@@ -55,38 +59,103 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       }
       return;
     }
+    if (record.kind == DownloadKind.audio) {
+      try {
+        await MediaPlayback.instance.activateAudioFile(
+          AudioFileTrack(
+            cacheName: record.cacheName,
+            path: file.path,
+            name: record.name.trim().isEmpty
+                ? AppLocalizations.of(context)!.downloadsAudio
+                : record.name.trim(),
+            sourceName: record.sourceName,
+            chatId: record.chatId,
+            messageId: record.messageId,
+            messageTime: record.messageTime,
+            thumbnailUrl: record.thumbnailUrl,
+          ),
+          notificationChannelName: AppLocalizations.of(
+            context,
+          )!.audioPlaybackChannel,
+        );
+      } catch (_) {
+        if (mounted) {
+          showCustomNotification(
+            context,
+            AppLocalizations.of(context)!.downloadsOpenFailed,
+          );
+        }
+      }
+      return;
+    }
     final result = await OpenFilex.open(file.path);
     if (!mounted || result.type == ResultType.done) return;
+    if (result.type == ResultType.noAppToOpen) {
+      await shareUnopenableFile(context, file.path);
+      return;
+    }
     showCustomNotification(
       context,
       AppLocalizations.of(context)!.downloadsOpenFailed,
     );
   }
 
-  Future<void> _saveAs(DownloadRecord record) async {
+  Future<File?> _existingFile(DownloadRecord record) async {
     final file = await DownloadHistory.fileFor(record);
-    if (!mounted) return;
-    if (file == null) {
-      await DownloadHistory.remove(record.cacheName);
-      if (mounted) {
-        showCustomNotification(
-          context,
-          AppLocalizations.of(context)!.downloadsOpenFailed,
-        );
-      }
-      return;
+    if (file != null || !mounted) return file;
+    await DownloadHistory.remove(record.cacheName);
+    if (mounted) {
+      showCustomNotification(
+        context,
+        AppLocalizations.of(context)!.downloadsOpenFailed,
+      );
     }
+    return null;
+  }
+
+  Future<void> _saveToGallery(DownloadRecord record) async {
+    final file = await _existingFile(record);
+    if (file == null || !mounted) return;
+    final result = await saveLocalMedia(
+      file,
+      saveName: _saveName(record),
+      kind: record.kind == DownloadKind.video
+          ? SaveMediaKind.video
+          : SaveMediaKind.image,
+    );
+    if (!mounted) return;
+    final l10n = AppLocalizations.of(context)!;
+    showCustomNotification(
+      context,
+      result.ok
+          ? l10n.photoViewerSavedToGallery
+          : l10n.notificationsSaveFailed(result.errorText(l10n)),
+    );
+  }
+
+  Future<void> _saveAs(DownloadRecord record) async {
+    final file = await _existingFile(record);
+    if (file == null || !mounted) return;
     final result = await saveFileAs(
       source: file,
       fileName: _saveName(record),
       dialogTitle: AppLocalizations.of(context)!.photoViewerSaveAs,
     );
     if (!mounted || result.cancelled) return;
+    final l10n = AppLocalizations.of(context)!;
     showCustomNotification(
       context,
-      result.saved ? 'Файл сохранён' : 'Не удалось сохранить файл',
+      result.saved ? l10n.photoViewerFileSaved : l10n.photoViewerSaveFileFailed,
     );
   }
+
+  bool _fitsGallery(DownloadRecord record) =>
+      savesToGallery &&
+      const {
+        DownloadKind.photo,
+        DownloadKind.video,
+        DownloadKind.gif,
+      }.contains(record.kind);
 
   void _goToMessage(DownloadRecord record) {
     if (record.chatId == null || record.messageId?.isNotEmpty != true) return;
@@ -192,6 +261,9 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                     return _DownloadTile(
                       record: record,
                       onTap: () => _open(record),
+                      onSaveToGallery: _fitsGallery(record)
+                          ? () => _saveToGallery(record)
+                          : null,
                       onSaveAs: () => _saveAs(record),
                       onGoToMessage:
                           record.chatId != null &&
@@ -242,12 +314,14 @@ class _DownloadsEmpty extends StatelessWidget {
 class _DownloadTile extends StatelessWidget {
   final DownloadRecord record;
   final VoidCallback onTap;
+  final VoidCallback? onSaveToGallery;
   final VoidCallback onSaveAs;
   final VoidCallback? onGoToMessage;
 
   const _DownloadTile({
     required this.record,
     required this.onTap,
+    required this.onSaveToGallery,
     required this.onSaveAs,
     required this.onGoToMessage,
   });
@@ -265,6 +339,12 @@ class _DownloadTile extends StatelessWidget {
             icon: Symbols.visibility,
             label: l10n.sharedGoToMessage,
             onTap: onGoToMessage,
+          ),
+        if (onSaveToGallery != null)
+          ChatMenuItem(
+            icon: Symbols.photo_library,
+            label: l10n.photoViewerSaveToGallery,
+            onTap: onSaveToGallery,
           ),
         ChatMenuItem(
           icon: Symbols.download,
@@ -308,7 +388,7 @@ class _DownloadTile extends StatelessWidget {
                   ),
                   const SizedBox(height: 5),
                   Text(
-                    '${formatBytes(record.size)} · $source',
+                    '${formatBytes(l10n, record.size)} · $source',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),

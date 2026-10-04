@@ -11,9 +11,11 @@ import '../../models/shared_payload.dart';
 import '../utils/logger.dart';
 import 'video_transcoder.dart';
 
+// #***! миниатюра для поделиться, 128 px хватает
 const int _thumbMaxDimension = 128;
 const int _thumbQuality = 70;
 
+// #***! у фото сама картинка, у видео первый кадр
 Future<String?> sharedThumbnailDataUri(SharedFile source) async {
   switch (source.kind) {
     case SharedFileKind.photo:
@@ -25,6 +27,7 @@ Future<String?> sharedThumbnailDataUri(SharedFile source) async {
   }
 }
 
+// #***! декодируем в изоляте иначе список подвисает
 Future<String?> _photoThumb(File file) async {
   try {
     final png = await _platformPhotoThumb(file);
@@ -68,6 +71,7 @@ Future<Uint8List?> _platformPhotoThumb(File file) async {
   }
 }
 
+// #***! плагина кадров может не быть, тогда просто без превью
 Future<String?> _videoThumb(File file) async {
   try {
     final frames = await VideoTranscoder.frames(file.path, const [
@@ -88,6 +92,7 @@ String? _asDataUri(Uint8List? bytes, {String mime = 'image/jpeg'}) {
   return 'data:$mime;base64,${base64Encode(bytes)}';
 }
 
+// #***! уважаем EXIF поворот иначе миниатюра на боку
 Uint8List? _encodeThumbIsolate(Uint8List bytes) {
   final decoded = img.decodeImage(bytes);
   if (decoded == null) return null;
@@ -106,6 +111,7 @@ Uint8List? _encodeThumbIsolate(Uint8List bytes) {
   return img.encodeJpg(scaled, quality: _thumbQuality);
 }
 
+// #***! провайдеры кэшируем, иначе base64 декодируется на каждый билд
 final Map<String, ImageProvider> _sharedThumbCache = {};
 
 ImageProvider? decodeSharedThumb(String? dataUri) {

@@ -187,7 +187,11 @@ void main() {
     tester,
   ) async {
     await _pushViewer(tester);
-    await tester.dragFrom(const Offset(650, 260), const Offset(-500, 0));
+    await tester.timedDragFrom(
+      const Offset(650, 260),
+      const Offset(-500, 0),
+      const Duration(milliseconds: 600),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.byType(PhotoViewerScreen), findsOneWidget);
@@ -253,7 +257,9 @@ void main() {
     expect(find.textContaining('сегодня в'), findsOneWidget);
   });
 
-  testWidgets('rotate button turns the photo by 90 degrees', (tester) async {
+  testWidgets('rotate button turns the photo counter-clockwise, as its icon', (
+    tester,
+  ) async {
     await _pumpViewer(tester, message: _message());
 
     expect(
@@ -266,7 +272,7 @@ void main() {
 
     expect(
       tester.widget<RotatedBox>(find.byType(RotatedBox).first).quarterTurns,
-      1,
+      3,
     );
   });
 

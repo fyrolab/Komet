@@ -5,12 +5,17 @@ final class KometShareBridge {
   private let queue = DispatchQueue(label: "ru.komet.app.share", qos: .userInitiated)
   private var store: KometShareStore?
   private var sink: FlutterEventSink?
+  private let extensionEnabled = Bundle.main.object(forInfoDictionaryKey: "KometShareExtensionEnabled") as? Bool != false
 
   func attach(_ sink: FlutterEventSink?) {
     self.sink = sink
   }
 
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    if !extensionEnabled && ["syncShareAccount", "clearShareAccount", "clearAllShareAccounts", "readShareToken"].contains(call.method) {
+      result(nil)
+      return
+    }
     switch call.method {
     case "consumeInitialShare":
       perform(result) { try $0.nextPayload() }
@@ -87,7 +92,13 @@ final class KometShareBridge {
 
   private func sharedStore() throws -> KometShareStore {
     if let store = store { return store }
-    let store = try KometShareStore()
+    let store: KometShareStore
+    if extensionEnabled {
+      store = try KometShareStore()
+    } else {
+      let container = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+      store = try KometShareStore(containerURL: container)
+    }
     self.store = store
     return store
   }

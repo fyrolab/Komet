@@ -4,9 +4,12 @@ import 'package:flutter/foundation.dart';
 
 import '../../core/protocol/opcode_map.dart';
 import '../../core/protocol/packet.dart';
+import '../../core/utils/channel_comments.dart';
+import '../../core/utils/logger.dart';
 import '../api.dart';
 import 'messages.dart' show CachedMessage;
 
+// #***! счётчик комментов под постом
 class CommentsInfo {
   final String postId;
   final int? totalCount;
@@ -33,6 +36,7 @@ class CommentsInfo {
   }
 }
 
+// #***! пришёл новый комментарий
 class CommentAddedEvent {
   final int chatId;
   final String postId;
@@ -40,11 +44,13 @@ class CommentAddedEvent {
   const CommentAddedEvent(this.chatId, this.postId, this.comment);
 }
 
+// #***! комменты к постам, своих опкодов нет переиспользуют обычные с postId
 class CommentsModule {
   final Api _api;
 
   CommentsModule(this._api);
 
+  // #***! revision на изменение счётчиков, кнопки под постами подписаны
   final ValueNotifier<int> revision = ValueNotifier<int>(0);
 
   final _infoController =
@@ -69,6 +75,7 @@ class CommentsModule {
     revision.dispose();
   }
 
+  // #***! подписка на счётчики и новые комменты
   void attachPushHandlers(Api api) {
     _pushSub?.cancel();
     _pushSub = api.pushStream.listen(_handlePush);
@@ -88,6 +95,7 @@ class CommentsModule {
     }
   }
 
+  // #***! коммент приходит обычным notifMessage, узнаём по postId
   void _handleCommentPush(Packet packet) {
     final payload = packet.payload;
     if (payload is! Map) return;
@@ -113,6 +121,7 @@ class CommentsModule {
     _commentController.add(CommentAddedEvent(chatId, postId, comment));
   }
 
+  // #***! счётчики новой картой, подписчики сравнивают ссылки
   void handleInfoUpdate(List updates) {
     if (updates.isEmpty) return;
     Map<String, CommentsInfo>? next;
@@ -134,36 +143,63 @@ class CommentsModule {
     _infoController.add(Map.unmodifiable(_info));
   }
 
-  Future<Map<String, CommentsInfo>> fetchInfo({
+  // #***! счётчики сразу по пачке постов
+  /// Requests comment counts for [postIds] in batches.
+  ///
+  /// Returns the counts the server sent, or `null` when a batch did not
+  /// reach the server or got no reply (no connection, timeout), so the
+  /// caller can ask again once the session is back.
+  Future<Map<String, CommentsInfo>?> fetchInfo({
     required int accountId,
     required int chatId,
     required List<String> postIds,
   }) async {
     _accountId = accountId;
     if (postIds.isEmpty) return const {};
-    final response = await _api.sendRequest(Opcode.commentsInfo, {
-      'chatId': chatId,
-      'postIds': postIds.map((id) => int.tryParse(id) ?? id).toList(),
-    });
-    if (!response.isOk) return const {};
-    final payload = response.payload;
-    if (payload is! Map) return const {};
-    final updates = payload['commentsInfoUpdates'];
-    if (updates is! List) return const {};
-    handleInfoUpdate(updates);
     final byPost = <String, CommentsInfo>{};
-    for (final raw in updates.whereType<Map>()) {
-      final postId = raw['postId']?.toString();
-      final commentsInfo = raw['commentsInfo'];
-      if (postId == null || commentsInfo is! Map) continue;
-      byPost[postId] = CommentsInfo.fromPayload(
-        postId,
-        Map<String, dynamic>.from(commentsInfo.cast()),
-      );
+    var failed = false;
+    for (final batch in commentsInfoBatches(postIds)) {
+      final updates = await _fetchInfoBatch(chatId, batch);
+      if (updates == null) {
+        failed = true;
+        continue;
+      }
+      handleInfoUpdate(updates);
+      for (final raw in updates.whereType<Map>()) {
+        final postId = raw['postId']?.toString();
+        final commentsInfo = raw['commentsInfo'];
+        if (postId == null || commentsInfo is! Map) continue;
+        byPost[postId] = CommentsInfo.fromPayload(
+          postId,
+          Map<String, dynamic>.from(commentsInfo.cast()),
+        );
+      }
     }
-    return byPost;
+    return failed ? null : byPost;
   }
 
+  Future<List?> _fetchInfoBatch(int chatId, List<String> postIds) async {
+    try {
+      final response = await _api.sendRequest(Opcode.commentsInfo, {
+        'chatId': chatId,
+        'postIds': postIds.map((id) => int.tryParse(id) ?? id).toList(),
+      });
+      if (!response.isOk) {
+        // #***! ответ с ошибкой повторять бессмысленно, в отличие от обрыва
+        logger.w('commentsInfo $chatId: ${response.payload}');
+        return const [];
+      }
+      final payload = response.payload;
+      if (payload is! Map) return const [];
+      final updates = payload['commentsInfoUpdates'];
+      return updates is List ? updates : const [];
+    } catch (e) {
+      logger.w('commentsInfo $chatId: $e');
+      return null;
+    }
+  }
+
+  // #***! история комментов это тот же chatHistory с postId
   Future<List<CachedMessage>> fetchHistory(
     int accountId,
     int chatId,
@@ -201,12 +237,14 @@ class CommentsModule {
         postId,
       );
       if (parsed != null) results.add(parsed);
+      // #***! уступаем кадр каждые 20 сообщений чтоб анимация не встала
       if (i > 0 && i % 20 == 0) await Future<void>.delayed(Duration.zero);
     }
 
     return results;
   }
 
+  // #***! отправка коммента, cid это минус время по нему сервер режет дубли
   Future<String> sendComment(
     int accountId,
     int chatId,
@@ -258,6 +296,7 @@ class CommentsModule {
     return '';
   }
 
+  // #***! печатает в комментах, ошибки не важны
   void sendTyping(int chatId, String postId, String type) {
     unawaited(() async {
       try {
@@ -270,6 +309,7 @@ class CommentsModule {
     }());
   }
 
+  // #***! разбор коммента в CachedMessage с postId
   CachedMessage? _parseComment(
     Map<dynamic, dynamic> m,
     int accountId,

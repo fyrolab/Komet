@@ -8,8 +8,9 @@ import '../../../backend/modules/chats.dart';
 import '../../../backend/modules/contacts.dart';
 import '../../../backend/modules/messages.dart' show ContactCache;
 import '../../../core/storage/app_database.dart';
+import '../../../core/contacts/contact_labels.dart';
 import '../../../core/utils/debouncer.dart';
-import '../../../core/utils/names.dart';
+import '../../../l10n/app_localizations.dart';
 import '../../widgets/komet_avatar.dart';
 import '../../widgets/small_spinner.dart';
 import '../../widgets/swipe_route.dart';
@@ -128,21 +129,26 @@ class _SearchScreenState extends State<SearchScreen> {
     });
   }
 
+  ContactLabels _contactLabels(Map<String, dynamic> row) => contactLabels(
+    idLabel: AppLocalizations.of(context)!.contactIdFallback('${row['id']}'),
+    firstName: row['first_name'],
+    lastName: row['last_name'],
+    phone: row['phone'],
+  );
+
   String _contactName(Map<String, dynamic> row) {
     final id = row['id'];
     if (id is int) {
       final cached = ContactCache.get(id);
       if (cached != null && cached.isNotEmpty) return cached;
     }
-    return displayName(
-      row['first_name'],
-      row['last_name'],
-      fallback: '+${row['phone']}',
-    );
+    return _contactLabels(row).title;
   }
 
   String _phoneResultName(PhoneLookupResult result) {
-    return ContactCache.get(result.id) ?? result.name ?? 'User #${result.id}';
+    return ContactCache.get(result.id) ??
+        result.name ??
+        AppLocalizations.of(context)!.userFallbackName(result.id);
   }
 
   ({String name, String? avatar, String type}) _chatIdentity(
@@ -153,7 +159,11 @@ class _SearchScreenState extends State<SearchScreen> {
   ) {
     final fallbackType = type ?? 'CHAT';
     if (chatId == 0) {
-      return (name: 'Избранное', avatar: iconUrl, type: fallbackType);
+      return (
+        name: AppLocalizations.of(context)!.searchScreenSavedMessages,
+        avatar: iconUrl,
+        type: fallbackType,
+      );
     }
     final me = _accountId ?? 0;
     final peer = me == 0 ? 0 : chatId ^ me;
@@ -242,7 +252,7 @@ class _SearchScreenState extends State<SearchScreen> {
           style: TextStyle(color: cs.onSurface, fontSize: 16),
           textInputAction: TextInputAction.search,
           decoration: InputDecoration(
-            hintText: 'Поиск',
+            hintText: AppLocalizations.of(context)!.chatInfoMembersSearchHint,
             hintStyle: TextStyle(color: cs.outline, fontSize: 16),
             border: InputBorder.none,
             isDense: true,
@@ -265,14 +275,15 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _buildBody(ColorScheme cs, String query, bool hasResults) {
+    final l10n = AppLocalizations.of(context)!;
     if (query.isEmpty) {
-      return _buildHint(cs, Symbols.search, 'Начните вводить запрос');
+      return _buildHint(cs, Symbols.search, l10n.searchScreenStartTyping);
     }
     if (!hasResults) {
       if (_loading) {
         return const Center(child: SmallSpinner(size: 36));
       }
-      return _buildHint(cs, Symbols.search_off, 'Ничего не найдено');
+      return _buildHint(cs, Symbols.search_off, l10n.contactsSearchEmpty);
     }
     final phoneResult = _phoneResult;
     return ListView(
@@ -280,7 +291,7 @@ class _SearchScreenState extends State<SearchScreen> {
       children: [
         if (_loading) const LinearProgressIndicator(minHeight: 2),
         if (phoneResult != null) ...[
-          _sectionHeader(cs, 'По номеру'),
+          _sectionHeader(cs, l10n.searchScreenByPhone),
           _ResultTile(
             name: _phoneResultName(phoneResult),
             imageUrl: phoneResult.avatarUrl,
@@ -289,25 +300,25 @@ class _SearchScreenState extends State<SearchScreen> {
           ),
         ],
         if (_contacts.isNotEmpty) ...[
-          _sectionHeader(cs, 'Контакты'),
+          _sectionHeader(cs, l10n.searchScreenContacts),
           for (final row in _contacts)
             _ResultTile(
               name: _contactName(row),
               imageUrl: row['base_url'] as String?,
-              subtitle: '+${row['phone']}',
+              subtitle: _contactLabels(row).subtitle,
               onTap: () => _openContact(row),
             ),
         ],
         if (_chats.isNotEmpty) ...[
-          _sectionHeader(cs, 'Чаты'),
+          _sectionHeader(cs, l10n.searchScreenChats),
           for (final row in _chats) _localChatTile(row),
         ],
         if (_messages.isNotEmpty) ...[
-          _sectionHeader(cs, 'Сообщения'),
+          _sectionHeader(cs, l10n.authLimitsSignupMessagesTitle),
           for (final hit in _messages) _messageTile(hit),
         ],
         if (_public.isNotEmpty) ...[
-          _sectionHeader(cs, 'Глобальный поиск'),
+          _sectionHeader(cs, l10n.searchScreenGlobalSearch),
           for (final hit in _public) _chatTile(hit),
         ],
         const SizedBox(height: 16),
@@ -346,7 +357,9 @@ class _SearchScreenState extends State<SearchScreen> {
       meta?['title'] as String?,
       meta?['icon_url'] as String?,
     );
-    final name = identity.name.isEmpty ? 'Чат' : identity.name;
+    final name = identity.name.isEmpty
+        ? AppLocalizations.of(context)!.hubChatTileTitle
+        : identity.name;
     return _ResultTile(
       name: name,
       imageUrl: identity.avatar,
@@ -410,7 +423,9 @@ class _ResultTile extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    name.isEmpty ? 'Без названия' : name,
+                    name.isEmpty
+                        ? AppLocalizations.of(context)!.searchScreenUntitled
+                        : name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(

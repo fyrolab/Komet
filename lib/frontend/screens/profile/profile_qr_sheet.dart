@@ -1,0 +1,204 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../../core/config/app_shape.dart';
+import '../../../core/links/profile_link.dart';
+import '../../../l10n/app_localizations.dart';
+import '../../widgets/hint_bubble.dart';
+import '../../widgets/komet_avatar.dart';
+import '../../widgets/qr_code_view.dart';
+import '../../widgets/sheet_helpers.dart';
+import '../../widgets/small_spinner.dart';
+
+const Color _cardColor = Color(0xFFFFFFFF);
+const Color _moduleColor = Color(0xFF101418);
+
+Future<void> showProfileQrSheet(
+  BuildContext context, {
+  required String name,
+  String? avatarUrl,
+}) {
+  final l10n = AppLocalizations.of(context)!;
+  return showLinkQrSheet(
+    context,
+    name: name,
+    avatarUrl: avatarUrl,
+    title: l10n.profileQrTitle,
+    hint: l10n.profileQrHint,
+    unavailable: l10n.profileQrUnavailable,
+    loadLink: ownProfileLink,
+  );
+}
+
+Future<void> showLinkQrSheet(
+  BuildContext context, {
+  required String name,
+  String? avatarUrl,
+  required String title,
+  required String hint,
+  required String unavailable,
+  required Future<String?> Function() loadLink,
+}) {
+  final cs = Theme.of(context).colorScheme;
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: cs.surfaceContainerHigh,
+    shape: kSheetShape,
+    builder: (_) => _LinkQrSheet(
+      name: name,
+      avatarUrl: avatarUrl,
+      title: title,
+      hint: hint,
+      unavailable: unavailable,
+      loadLink: loadLink,
+    ),
+  );
+}
+
+class _LinkQrSheet extends StatefulWidget {
+  final String name;
+  final String? avatarUrl;
+  final String title;
+  final String hint;
+  final String unavailable;
+  final Future<String?> Function() loadLink;
+
+  const _LinkQrSheet({
+    required this.name,
+    this.avatarUrl,
+    required this.title,
+    required this.hint,
+    required this.unavailable,
+    required this.loadLink,
+  });
+
+  @override
+  State<_LinkQrSheet> createState() => _LinkQrSheetState();
+}
+
+class _LinkQrSheetState extends State<_LinkQrSheet> {
+  String? _link;
+  bool _failed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    String? link;
+    try {
+      link = await widget.loadLink();
+    } catch (_) {
+      link = null;
+    }
+    if (!mounted) return;
+    setState(() {
+      _link = link;
+      _failed = link == null;
+    });
+  }
+
+  Future<void> _copy(BuildContext buttonContext) async {
+    final link = _link;
+    if (link == null) return;
+    final message = AppLocalizations.of(context)!.sharedLinkCopied;
+    await Clipboard.setData(ClipboardData(text: link));
+    if (!buttonContext.mounted) return;
+    showHintBubble(buttonContext, message);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
+    final width = MediaQuery.sizeOf(context).width;
+    final qrSize = (width - 128).clamp(180.0, 260.0);
+    final link = _link;
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Center(child: SheetGrabber()),
+            Text(
+              widget.title,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: cs.onSurface,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              widget.hint,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
+            ),
+            const SizedBox(height: 20),
+            Center(
+              child: Container(
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  color: _cardColor,
+                  borderRadius: AppShape.cardRadius,
+                ),
+                child: SizedBox.square(
+                  dimension: qrSize,
+                  child: Center(child: _buildCode(cs, qrSize)),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Builder(
+              builder: (buttonContext) => FilledButton.icon(
+                onPressed: link == null ? null : () => _copy(buttonContext),
+                icon: const Icon(Icons.link, size: 20),
+                label: Text(l10n.sharedCopyLink),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: AppShape.buttonBorder,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCode(ColorScheme cs, double qrSize) {
+    if (_failed) {
+      return Text(
+        widget.unavailable,
+        textAlign: TextAlign.center,
+        style: const TextStyle(color: _moduleColor, fontSize: 14),
+      );
+    }
+    final link = _link;
+    if (link == null) return SmallSpinner(size: 28, color: cs.primary);
+    return QrCodeView(
+      data: link,
+      size: qrSize,
+      moduleColor: _moduleColor,
+      center: Container(
+        padding: const EdgeInsets.all(4),
+        decoration: const BoxDecoration(
+          color: _cardColor,
+          shape: BoxShape.circle,
+        ),
+        child: KometAvatar(
+          name: widget.name,
+          imageUrl: widget.avatarUrl,
+          size: qrSize * 0.24 - 8,
+        ),
+      ),
+    );
+  }
+}

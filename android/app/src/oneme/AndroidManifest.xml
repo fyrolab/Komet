@@ -1,0 +1,24 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity-alias
+            android:name="ru.komet.app.IntentEntry"
+            android:exported="true"
+            android:targetActivity="ru.komet.app.MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https" android:host="max.ru"/>
+                <data android:scheme="https" android:host="www.max.ru"/>
+                <data android:scheme="http" android:host="max.ru"/>
+                <data android:scheme="http" android:host="www.max.ru"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="max"/>
+            </intent-filter>
+        </activity-alias>
+    </application>
+</manifest>

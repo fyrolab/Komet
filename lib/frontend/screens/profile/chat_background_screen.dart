@@ -1,9 +1,9 @@
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../../../core/config/app_wallpaper_tint.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/storage/chat_wallpaper_store.dart';
+import '../../../l10n/app_localizations.dart';
 import '../../widgets/chat_wallpaper_sheet.dart';
 import '../../widgets/chat_wallpaper_view.dart';
 import '../../widgets/custom_notification.dart';
@@ -72,21 +72,24 @@ class _ChatBackgroundScreenState extends State<ChatBackgroundScreen> {
       case WallpaperPickType.gallery:
         await _pickFromGallery();
         break;
+      case WallpaperPickType.gradient:
+        final colors = pick.gradientColors;
+        if (colors == null || colors.isEmpty) break;
+        await store.setGradient(
+          _accountId,
+          kGlobalWallpaperChatId,
+          colors,
+          animated: pick.gradientAnimated,
+          rotation: pick.gradientRotation,
+        );
+        _refresh();
+        break;
     }
   }
 
   Future<void> _pickFromGallery() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      withData: true,
-    );
-    if (result == null || result.files.isEmpty) return;
-    final bytes = result.files.first.bytes;
-    if (bytes == null) {
-      if (mounted) showCustomNotification(context, 'Не удалось прочитать файл');
-      return;
-    }
-    if (!mounted) return;
+    final bytes = await pickWallpaperBytes(context);
+    if (bytes == null || !mounted) return;
     final settings = await Navigator.of(context).push<WallpaperImageSettings>(
       MaterialPageRoute(
         builder: (_) => ChatWallpaperPreviewScreen(imageBytes: bytes),
@@ -101,7 +104,10 @@ class _ChatBackgroundScreenState extends State<ChatBackgroundScreen> {
     );
     if (!mounted) return;
     if (wp == null) {
-      showCustomNotification(context, 'Не удалось сохранить обои');
+      showCustomNotification(
+        context,
+        AppLocalizations.of(context)!.chatBackgroundSaveFailed,
+      );
       return;
     }
     _refresh();
@@ -116,7 +122,7 @@ class _ChatBackgroundScreenState extends State<ChatBackgroundScreen> {
         backgroundColor: cs.surface,
         surfaceTintColor: Colors.transparent,
         title: Text(
-          'Фон чатов',
+          AppLocalizations.of(context)!.chatBackgroundTitle,
           style: TextStyle(
             fontSize: 22,
             fontWeight: FontWeight.w700,
@@ -156,6 +162,7 @@ class _ChatBackgroundScreenState extends State<ChatBackgroundScreen> {
   }
 
   Widget _panel(ColorScheme cs) {
+    final l10n = AppLocalizations.of(context)!;
     return Container(
       width: double.infinity,
       decoration: BoxDecoration(
@@ -168,7 +175,7 @@ class _ChatBackgroundScreenState extends State<ChatBackgroundScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            'Эти обои применяются ко всем чатам, где не выбран свой фон.',
+            l10n.chatBackgroundDescription,
             style: TextStyle(
               color: cs.onSurfaceVariant,
               fontSize: 14,
@@ -185,7 +192,7 @@ class _ChatBackgroundScreenState extends State<ChatBackgroundScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Подстраивать интерфейс под обои',
+                        l10n.chatBackgroundTintTitle,
                         style: TextStyle(
                           color: cs.onSurface,
                           fontSize: 15,
@@ -194,7 +201,7 @@ class _ChatBackgroundScreenState extends State<ChatBackgroundScreen> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'Акцентный цвет приложения возьмётся из фона',
+                        l10n.chatBackgroundTintSubtitle,
                         style: TextStyle(
                           color: cs.onSurfaceVariant,
                           fontSize: 12.5,
@@ -223,7 +230,7 @@ class _ChatBackgroundScreenState extends State<ChatBackgroundScreen> {
               ),
               child: Center(
                 child: Text(
-                  'Выбрать обои',
+                  l10n.chatBackgroundPick,
                   style: TextStyle(
                     color: cs.onPrimary,
                     fontSize: 16,
@@ -247,6 +254,7 @@ class _SampleBubbles extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
     return Align(
       alignment: Alignment.bottomCenter,
       child: Padding(
@@ -257,7 +265,7 @@ class _SampleBubbles extends StatelessWidget {
           children: [
             _bubble(
               context,
-              text: 'Единый фон для всех чатов',
+              text: l10n.chatBackgroundSampleIncoming,
               color: cs.surfaceContainerHighest.withValues(alpha: 0.94),
               textColor: cs.onSurface,
               alignment: Alignment.centerLeft,
@@ -265,7 +273,7 @@ class _SampleBubbles extends StatelessWidget {
             const SizedBox(height: 8),
             _bubble(
               context,
-              text: 'Красиво ✨',
+              text: l10n.chatBackgroundSampleOutgoing,
               color: cs.primary,
               textColor: cs.onPrimary,
               alignment: Alignment.centerRight,

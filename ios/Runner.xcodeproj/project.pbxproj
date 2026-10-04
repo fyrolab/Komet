@@ -21,14 +21,15 @@
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
 		84C5FAB35E4A95AA6E2C518F /* ShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 4D596EC330D2D8F8B8A26AB6 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		8B650DA70DC4BDFC02F5F1BE /* KometShareAccounts.swift in Sources */ = {isa = PBXBuildFile; fileRef = D53D7B6C0957C1CD6DB59B64 /* KometShareAccounts.swift */; };
+		AA11BB22CC33DD44EE550101 /* KometVideo.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550001 /* KometVideo.swift */; };
+		AA11BB22CC33DD44EE550102 /* KometVideoNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550002 /* KometVideoNote.swift */; };
+		AA11BB22CC33DD44EE550103 /* KometNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550003 /* KometNotifications.swift */; };
+		AA11BB22CC33DD44EE550105 /* KometClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550005 /* KometClipboard.swift */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
 		992D92E93FC84DF35C61C032 /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F7A1887EA57B6C16B500C901 /* CoreFoundation.framework */; };
 		9BDF85BC70348818AEF10CBA /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A63E96B763FA654541020DC2 /* Security.framework */; };
-		AA11BB22CC33DD44EE550101 /* KometVideo.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550001 /* KometVideo.swift */; };
-		AA11BB22CC33DD44EE550102 /* KometVideoNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550002 /* KometVideoNote.swift */; };
-		AA11BB22CC33DD44EE550103 /* KometNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA11BB22CC33DD44EE550003 /* KometNotifications.swift */; };
 		B1B2C3D41234567890ABCDEF /* MinimalIcon@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41234567890ABCDEF /* MinimalIcon@2x.png */; };
 		B1B2C3D41234567890ABCDF0 /* MinimalIcon@3x.png in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41234567890ABCDF0 /* MinimalIcon@3x.png */; };
 		BB80EDFFF111F138D3411790 /* KometShareStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDAACAA16E141CC00CF7D7A6 /* KometShareStore.swift */; };
@@ -96,6 +97,11 @@
 		6792C66B074C477FB31A4F02 /* ShareViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550001 /* KometVideo.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometVideo.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550002 /* KometVideoNote.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometVideoNote.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550003 /* KometNotifications.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometNotifications.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550005 /* KometClipboard.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometClipboard.swift; sourceTree = "<group>"; };
+		AA11BB22CC33DD44EE550004 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		782E66FE4E292DCFD0D1B7D2 /* Pods-RunnerTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.release.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"; sourceTree = "<group>"; };
 		789A1AEF2F4FF7DEED202476 /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		78E0A7A72DC9AD7400C4905E /* FlutterGeneratedPluginSwiftPackage */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = FlutterGeneratedPluginSwiftPackage; path = Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage; sourceTree = "<group>"; };
@@ -114,10 +120,6 @@
 		A1B2C3D41234567890ABCDF0 /* MinimalIcon@3x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "MinimalIcon@3x.png"; sourceTree = "<group>"; };
 		A63E96B763FA654541020DC2 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		A92990150F2CFE8F72ACA01D /* ShareExtension-Bridging-Header.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = "ShareExtension-Bridging-Header.h"; sourceTree = "<group>"; };
-		AA11BB22CC33DD44EE550001 /* KometVideo.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometVideo.swift; sourceTree = "<group>"; };
-		AA11BB22CC33DD44EE550002 /* KometVideoNote.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometVideoNote.swift; sourceTree = "<group>"; };
-		AA11BB22CC33DD44EE550003 /* KometNotifications.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KometNotifications.swift; sourceTree = "<group>"; };
-		AA11BB22CC33DD44EE550004 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		D53D7B6C0957C1CD6DB59B64 /* KometShareAccounts.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KometShareAccounts.swift; sourceTree = "<group>"; };
 		DD7AE0A574C0096D5FAD78ED /* ShareExtension.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = ShareExtension.entitlements; sourceTree = "<group>"; };
 		E562D26E56EEB9A6420AD72B /* KometShareSender.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KometShareSender.swift; sourceTree = "<group>"; };
@@ -249,6 +251,7 @@
 				AA11BB22CC33DD44EE550001 /* KometVideo.swift */,
 				AA11BB22CC33DD44EE550002 /* KometVideoNote.swift */,
 				AA11BB22CC33DD44EE550003 /* KometNotifications.swift */,
+				AA11BB22CC33DD44EE550005 /* KometClipboard.swift */,
 				AA11BB22CC33DD44EE550004 /* Runner.entitlements */,
 				4B9DFBD85E3205C9ADEB401D /* KometShareBridge.swift */,
 			);
@@ -578,6 +581,7 @@
 				AA11BB22CC33DD44EE550101 /* KometVideo.swift in Sources */,
 				AA11BB22CC33DD44EE550102 /* KometVideoNote.swift in Sources */,
 				AA11BB22CC33DD44EE550103 /* KometNotifications.swift in Sources */,
+				AA11BB22CC33DD44EE550105 /* KometClipboard.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				BB80EDFFF111F138D3411790 /* KometShareStore.swift in Sources */,
 				08023DAB67DBB860F77BB775 /* KometShareBridge.swift in Sources */,

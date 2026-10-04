@@ -9,6 +9,8 @@ class MainFlutterWindow: NSWindow {
     self.setFrame(windowFrame, display: true)
     self.setFrameAutosaveName("MainWindow")
     RegisterGeneratedPlugins(registry: flutterViewController)
+    ClipboardMediaChannel.register(
+      messenger: flutterViewController.engine.binaryMessenger)
 
     super.awakeFromNib()
   }

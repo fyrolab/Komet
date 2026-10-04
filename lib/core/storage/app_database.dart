@@ -1,14 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:komet/core/storage/app_instance.dart';
+import 'package:komet/core/storage/message_ranges.dart';
 import 'package:komet/core/utils/logger.dart';
 import 'package:path/path.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart' show databaseFactorySqflitePlugin;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
+// #***! профиль как строка таблицы profile
 class ProfileData {
   final int id;
   final String firstName;
@@ -21,6 +24,7 @@ class ProfileData {
   final int accountStatus;
   final int updateTime;
   final List<int>? profileOptions;
+  final String? description;
 
   ProfileData({
     required this.id,
@@ -34,6 +38,7 @@ class ProfileData {
     required this.accountStatus,
     required this.updateTime,
     this.profileOptions,
+    this.description,
   });
 
   factory ProfileData.stub(int id) => ProfileData(
@@ -88,9 +93,17 @@ class ProfileData {
       updateTime: (contact['updateTime'] as int?) ?? 0,
       profileOptions:
           profileOptions ?? _parseProfileOptions(contact['profileOptions']),
+      description: _nonEmpty(contact['description']),
     );
   }
 
+  // #***! пустое описание от сервера это то же самое что его нет
+  static String? _nonEmpty(dynamic raw) {
+    if (raw is! String) return null;
+    return raw.isEmpty ? null : raw;
+  }
+
+  // #***! profileOptions в базе строкой а от сервера списком
   static List<int>? _parseProfileOptions(dynamic raw) {
     if (raw is! List) return null;
     final options = raw
@@ -126,9 +139,11 @@ class ProfileData {
       accountStatus: (row['account_status'] as int?) ?? 0,
       updateTime: (row['update_time'] as int?) ?? 0,
       profileOptions: profileOptions,
+      description: _nonEmpty(row['description']),
     );
   }
 
+  // #***! обратно в строку для sqflite
   Map<String, dynamic> toDbRow({bool isActive = false}) => {
     'id': id,
     'first_name': firstName,
@@ -142,9 +157,11 @@ class ProfileData {
     'update_time': updateTime,
     'is_active': isActive ? 1 : 0,
     'profile_options': profileOptions?.join(','),
+    'description': description,
   };
 }
 
+// #***! ключи sync_state, докуда мы досинхронизировались
 abstract class SyncKey {
   static const chatsSync = 'chats_sync';
   static const contactsSync = 'contacts_sync';
@@ -157,13 +174,18 @@ abstract class SyncKey {
   static const chatCacheFingerprint = 'chat_cache_fingerprint';
   static const serverTime = 'server_time';
   static const loginInfo = 'login_info';
+  static const serverConfigSeen = 'server_config_seen';
+  static const profileInviteLink = 'profile_invite_link';
+  static const welcomeStickerIds = 'welcome_sticker_ids';
 }
 
+// #***! вся локальная база, профили чаты контакты сообщения
 class AppDatabase {
   static Database? _db;
 
   static String? _mobileDbDir;
 
+  // #***! зовётся один раз на старте до первого обращения
   static Future<void> init() async {
     if (Platform.isAndroid || Platform.isIOS) {
       _mobileDbDir = await databaseFactorySqflitePlugin.getDatabasesPath();
@@ -174,6 +196,7 @@ class AppDatabase {
 
   static Completer<Database>? _initCompleter;
 
+  // #***! ленивое открытие с защитой от гонки чтоб базу не открыли дважды
   static Future<Database> get _instance async {
     if (_db != null) return _db!;
     if (_initCompleter != null) return _initCompleter!.future;
@@ -189,8 +212,13 @@ class AppDatabase {
     return _db!;
   }
 
+  // #***! на десктопе и на iOS в support, на андроиде в системной папке баз.
+  // #***! на iOS getDatabasesPath это Documents, а он открыт файловым шерингом
   static Future<String> _databasesDir() async {
-    if (Platform.isLinux || Platform.isWindows || Platform.isMacOS) {
+    if (Platform.isLinux ||
+        Platform.isWindows ||
+        Platform.isMacOS ||
+        Platform.isIOS) {
       final dir = await getApplicationSupportDirectory();
       return dir.path;
     }
@@ -198,7 +226,48 @@ class AppDatabase {
         .getDatabasesPath();
   }
 
+  static String? _legacyExposedDb;
+
+  // #***! WAL живёт в отдельных файлах, копировать надо все три
+  static Future<void> _copyDbFiles(String from, String to) async {
+    for (final suffix in const ['', '-wal', '-shm']) {
+      final src = File('$from$suffix');
+      if (await src.exists()) await src.copy('$to$suffix');
+    }
+  }
+
+  static Future<void> _dropLegacyExposedDb() async {
+    final legacy = _legacyExposedDb;
+    if (legacy == null) return;
+    _legacyExposedDb = null;
+    for (final suffix in const ['', '-wal', '-shm']) {
+      try {
+        final file = File('$legacy$suffix');
+        if (await file.exists()) await file.delete();
+      } catch (e) {
+        logger.w('[db] не удалось убрать старую базу: $e');
+      }
+    }
+  }
+
+  // #***! разовый перенос со старого пути
   static Future<void> _migrateLegacyDb(String target) async {
+    if (Platform.isIOS) {
+      try {
+        final legacyDir = await databaseFactorySqflitePlugin.getDatabasesPath();
+        final legacy = join(legacyDir, 'komet${AppInstance.suffix}.db');
+        if (legacy == target || !await File(legacy).exists()) return;
+        if (!await File(target).exists()) {
+          await _copyDbFiles(legacy, target);
+          logger.i('[db] перенёс базу из Documents в Application Support');
+        }
+        // #***! удаляем только после того, как новая база успешно откроется
+        _legacyExposedDb = legacy;
+      } catch (e) {
+        logger.w('ios db migration failed: $e');
+      }
+      return;
+    }
     if (AppInstance.isNamed) return;
     if (!(Platform.isLinux || Platform.isWindows || Platform.isMacOS)) return;
     try {
@@ -214,14 +283,16 @@ class AppDatabase {
     }
   }
 
+  // #***! версия 24, поднял версию дописывай миграцию ниже
   static Future<Database> _open() async {
     final dbPath = await _databasesDir();
     await Directory(dbPath).create(recursive: true);
     final target = join(dbPath, 'komet${AppInstance.suffix}.db');
     await _migrateLegacyDb(target);
-    return openDatabase(
+    final opened = await openDatabase(
       target,
-      version: 23,
+      // #***! каждый if oldVersion < N это шаг миграции, идут по порядку
+      version: 29,
       onOpen: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: (db, _) => _createTables(db),
       onUpgrade: (db, oldVersion, newVersion) async {
@@ -361,10 +432,38 @@ class AppDatabase {
             'INTEGER NOT NULL DEFAULT 0',
           );
         }
+        if (oldVersion < 24) {
+          await _addColumnIfMissing(db, 'messages', 'text_sealed', 'BLOB');
+          await _addColumnIfMissing(
+            db,
+            'messages',
+            'e2ee',
+            'INTEGER NOT NULL DEFAULT 0',
+          );
+          await db.execute(_e2eeSessionsSchema);
+        }
+        if (oldVersion < 25) {
+          await _addColumnIfMissing(db, 'chats_cache', 'active_call', 'TEXT');
+        }
+        if (oldVersion < 26) {
+          await _addColumnIfMissing(db, 'chats_cache', 'public_link', 'TEXT');
+        }
+        if (oldVersion < 27) {
+          await _addColumnIfMissing(db, 'profile', 'description', 'TEXT');
+        }
+        if (oldVersion < 28) {
+          await db.execute(_messageRangesSchema);
+        }
+        if (oldVersion < 29) {
+          await _addColumnIfMissing(db, 'messages', 'typing_ms', 'INTEGER');
+        }
       },
     );
+    await _dropLegacyExposedDb();
+    return opened;
   }
 
+  // #***! создание таблиц с нуля для свежей установки
   static Future<void> _createTables(Database db) async {
     await db.execute('''
       CREATE TABLE profile (
@@ -379,7 +478,8 @@ class AppDatabase {
         account_status INTEGER NOT NULL DEFAULT 0,
         update_time  INTEGER NOT NULL DEFAULT 0,
         is_active    INTEGER NOT NULL DEFAULT 0,
-        profile_options TEXT
+        profile_options TEXT,
+        description  TEXT
       )
     ''');
     await db.execute(_syncStateSchema);
@@ -389,10 +489,13 @@ class AppDatabase {
     await db.execute(_chatParticipantsSchema);
     await db.execute(_webAppStorageSchema);
     await db.execute(_webAppBiometrySchema);
+    await db.execute(_e2eeSessionsSchema);
+    await db.execute(_messageRangesSchema);
     await _createIndexes(db);
     await _createChatParticipantsIndex(db);
   }
 
+  // #***! в sqlite нет ADD COLUMN IF NOT EXISTS, делаем сами
   static Future<void> _addColumnIfMissing(
     Database db,
     String table,
@@ -405,6 +508,7 @@ class AppDatabase {
     await db.execute('ALTER TABLE $table ADD COLUMN $column $definition');
   }
 
+  // #***! индексы под частые выборки, без них список чатов тормозит
   static Future<void> _createIndexes(Database db) async {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(account_id, chat_id, time DESC)',
@@ -415,6 +519,9 @@ class AppDatabase {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(account_id)',
     );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(account_id, status)',
+    );
   }
 
   static Future<void> _createChatParticipantsIndex(Database db) async {
@@ -424,6 +531,7 @@ class AppDatabase {
     );
   }
 
+  // #***! участники отдельной таблицей чтоб искать диалог по собеседнику
   static List<int> _participantIdsFromRaw(Object? raw) {
     if (raw is! String || raw.isEmpty) return const [];
     try {
@@ -440,6 +548,7 @@ class AppDatabase {
     }
   }
 
+  // #***! дозаполняем участников для баз где таблицы ещё не было
   static Future<void> _backfillChatParticipants(Database db) async {
     final chats = await db.query(
       'chats_cache',
@@ -462,6 +571,7 @@ class AppDatabase {
     await batch.commit(noResult: true);
   }
 
+  // #***! схемы таблиц строками, их же жуют onCreate и миграции
   static const _contactsSchema = '''
     CREATE TABLE contacts (
       id           INTEGER PRIMARY KEY,
@@ -518,6 +628,8 @@ class AppDatabase {
       pinned_msg_time INTEGER,
       pinned_msg_is_preview INTEGER NOT NULL DEFAULT 0,
       last_mention_msg_id INTEGER,
+      active_call     TEXT,
+      public_link     TEXT,
       PRIMARY KEY (id, account_id)
     )
   ''';
@@ -545,8 +657,38 @@ class AppDatabase {
       payload    TEXT,
       deleted    INTEGER NOT NULL DEFAULT 0,
       edit_history TEXT,
+      text_sealed BLOB,
+      e2ee       INTEGER NOT NULL DEFAULT 0,
+      typing_ms  INTEGER,
       PRIMARY KEY (id, account_id),
       FOREIGN KEY (chat_id, account_id) REFERENCES chats_cache (id, account_id) ON DELETE CASCADE
+    )
+  ''';
+
+  static const _messageRangesSchema = '''
+    CREATE TABLE IF NOT EXISTS message_ranges (
+      account_id INTEGER NOT NULL,
+      chat_id    INTEGER NOT NULL,
+      start_time INTEGER NOT NULL,
+      end_time   INTEGER NOT NULL,
+      PRIMARY KEY (account_id, chat_id, start_time),
+      FOREIGN KEY (chat_id, account_id) REFERENCES chats_cache (id, account_id) ON DELETE CASCADE
+    )
+  ''';
+
+  static const _e2eeSessionsSchema = '''
+    CREATE TABLE e2ee_sessions (
+      account_id INTEGER NOT NULL REFERENCES profile(id) ON DELETE CASCADE,
+      chat_id    INTEGER NOT NULL,
+      peer_id    INTEGER NOT NULL,
+      phase      TEXT    NOT NULL,
+      state      BLOB,
+      peer_public BLOB,
+      verified   INTEGER NOT NULL DEFAULT 0,
+      offer_text TEXT,
+      offer_message_id TEXT,
+      updated    INTEGER NOT NULL,
+      PRIMARY KEY (account_id, chat_id)
     )
   ''';
 
@@ -570,6 +712,7 @@ class AppDatabase {
     )
   ''';
 
+  // #***! дальше операции с данными
   static Future<void> saveProfile(
     ProfileData profile, {
     bool isActive = true,
@@ -657,6 +800,15 @@ class AppDatabase {
     return rows.first['value'] as String;
   }
 
+  static Future<void> setWelcomeStickerIds(int accountId, List<int> ids) =>
+      setSyncValue(accountId, SyncKey.welcomeStickerIds, ids.join(','));
+
+  static Future<List<int>> getWelcomeStickerIds(int accountId) async {
+    final raw = await getSyncValue(accountId, SyncKey.welcomeStickerIds);
+    if (raw == null || raw.isEmpty) return const [];
+    return raw.split(',').map(int.tryParse).whereType<int>().toList();
+  }
+
   static Future<Map<String, String>> getAllSyncValues(int accountId) async {
     final db = await _instance;
     final rows = await db.query(
@@ -667,6 +819,66 @@ class AppDatabase {
     return {
       for (final row in rows) row['key'] as String: row['value'] as String,
     };
+  }
+
+  static Future<void> saveE2eeSession(Map<String, dynamic> row) async {
+    final db = await _instance;
+    await db.insert(
+      'e2ee_sessions',
+      row,
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  static Future<Map<String, dynamic>?> loadE2eeSession(
+    int accountId,
+    int chatId,
+  ) async {
+    final db = await _instance;
+    final rows = await db.query(
+      'e2ee_sessions',
+      where: 'account_id = ? AND chat_id = ?',
+      whereArgs: [accountId, chatId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    return rows.first;
+  }
+
+  static Future<List<Map<String, dynamic>>> loadE2eeSessions(
+    int accountId,
+  ) async {
+    final db = await _instance;
+    return db.query(
+      'e2ee_sessions',
+      where: 'account_id = ?',
+      whereArgs: [accountId],
+    );
+  }
+
+  static Future<void> deleteE2eeSession(int accountId, int chatId) async {
+    final db = await _instance;
+    await db.delete(
+      'e2ee_sessions',
+      where: 'account_id = ? AND chat_id = ?',
+      whereArgs: [accountId, chatId],
+    );
+  }
+
+  static Future<void> updateMessageSealed(
+    int accountId,
+    int chatId,
+    String messageId, {
+    required Uint8List? sealed,
+    required int e2ee,
+  }) async {
+    final db = await _instance;
+    await db.update(
+      'messages',
+      {'text_sealed': sealed, 'e2ee': e2ee},
+      where: 'account_id = ? AND chat_id = ? AND id = ?',
+      whereArgs: [accountId, chatId, messageId],
+    );
   }
 
   static Future<void> saveWebAppValue(
@@ -812,6 +1024,7 @@ class AppDatabase {
 
   // Chats cache
 
+  // #***! чаты пачкой в одной транзакции, по одному было бы на порядок медленнее
   static Future<void> saveChats(List<Map<String, dynamic>> rows) async {
     if (rows.isEmpty) return;
     try {
@@ -832,24 +1045,30 @@ class AppDatabase {
           batch.rawInsert(sql, cols.map((c) => row[c]).toList());
         }
         await batch.commit(noResult: true);
+        final participantsBatch = txn.batch();
+        var hasParticipantWrites = false;
         for (final row in rows) {
           if (!row.containsKey('participants')) continue;
           if (row['type'] != 'DIALOG') continue;
           final accountId = row['account_id'];
           final chatId = row['id'];
           if (accountId is! int || chatId is! int) continue;
-          await txn.delete(
+          hasParticipantWrites = true;
+          participantsBatch.delete(
             'chat_participants',
             where: 'account_id = ? AND chat_id = ?',
             whereArgs: [accountId, chatId],
           );
           for (final pid in _participantIdsFromRaw(row['participants'])) {
-            await txn.insert('chat_participants', {
+            participantsBatch.insert('chat_participants', {
               'account_id': accountId,
               'chat_id': chatId,
               'participant_id': pid,
             }, conflictAlgorithm: ConflictAlgorithm.ignore);
           }
+        }
+        if (hasParticipantWrites) {
+          await participantsBatch.commit(noResult: true);
         }
       });
     } catch (e) {
@@ -857,6 +1076,7 @@ class AppDatabase {
     }
   }
 
+  // #***! чиним имена отправителей после неполной синхры
   static Future<void> repairLastMessageSenders(int accountId) async {
     try {
       final db = await _instance;
@@ -889,6 +1109,7 @@ class AppDatabase {
     );
   }
 
+  // #***! в списке значит активный и не скрытый
   static bool chatRowIsInList(Map<String, dynamic> row) {
     final value = row['in_list'];
     return value is! int || value != 0;
@@ -897,6 +1118,41 @@ class AppDatabase {
   static Future<bool> isChatInList(int accountId, int chatId) async {
     final rows = await loadChat(accountId, chatId);
     return rows.isNotEmpty && chatRowIsInList(rows.first);
+  }
+
+  static Future<void> updateChatColumns(
+    List<({int accountId, int chatId, Map<String, Object?> values})> updates,
+  ) async {
+    if (updates.isEmpty) return;
+    try {
+      final db = await _instance;
+      final batch = db.batch();
+      for (final update in updates) {
+        batch.update(
+          'chats_cache',
+          update.values,
+          where: 'account_id = ? AND id = ?',
+          whereArgs: [update.accountId, update.chatId],
+        );
+      }
+      await batch.commit(noResult: true);
+    } catch (e) {
+      logger.e('Ошибка при обновлении чата: $e');
+    }
+  }
+
+  static Future<void> setChatListState(
+    int accountId,
+    int chatId,
+    int listState,
+  ) async {
+    final db = await _instance;
+    await db.update(
+      'chats_cache',
+      {'in_list': listState},
+      where: 'account_id = ? AND id = ?',
+      whereArgs: [accountId, chatId],
+    );
   }
 
   static Future<List<Map<String, dynamic>>> loadChats(
@@ -914,6 +1170,7 @@ class AppDatabase {
     );
   }
 
+  // #***! общий счётчик непрочитанных для бейджа
   static Future<int> sumUnread(
     int accountId, {
     int? excludeChatId,
@@ -939,6 +1196,7 @@ class AppDatabase {
     return (result.first['total'] as int?) ?? 0;
   }
 
+  // #***! поиск диалога по собеседнику, ради этого и таблица участников
   static Future<int?> findDialogChatByParticipant(
     int accountId,
     int contactId,
@@ -966,30 +1224,29 @@ class AppDatabase {
     );
   }
 
-  static String _escapeLike(String value) => value
-      .replaceAll('\\', '\\\\')
-      .replaceAll('%', '\\%')
-      .replaceAll('_', '\\_');
+  static bool contactMatches(Map<String, dynamic> row, String foldedTerm) {
+    final first = (row['first_name'] as String?)?.trim() ?? '';
+    final last = (row['last_name'] as String?)?.trim() ?? '';
+    return '$first $last'.toLowerCase().contains(foldedTerm) ||
+        '$last $first'.toLowerCase().contains(foldedTerm) ||
+        (row['phone']?.toString() ?? '').contains(foldedTerm);
+  }
 
   static Future<List<Map<String, dynamic>>> searchContacts(
     int accountId,
     String query, {
     int limit = 30,
   }) async {
-    final term = query.trim();
+    final term = query.trim().toLowerCase();
     if (term.isEmpty) return const [];
     final db = await _instance;
-    final like = '%${_escapeLike(term)}%';
-    return db.query(
+    final rows = await db.query(
       'contacts',
-      where:
-          'account_id = ? AND '
-          "(first_name LIKE ? ESCAPE '\\' OR last_name LIKE ? ESCAPE '\\' "
-          "OR CAST(phone AS TEXT) LIKE ? ESCAPE '\\')",
-      whereArgs: [accountId, like, like, like],
+      where: 'account_id = ?',
+      whereArgs: [accountId],
       orderBy: 'first_name ASC, last_name ASC',
-      limit: limit,
     );
+    return rows.where((row) => contactMatches(row, term)).take(limit).toList();
   }
 
   static Future<List<Map<String, dynamic>>> searchChatsByTitle(
@@ -997,17 +1254,19 @@ class AppDatabase {
     String query, {
     int limit = 30,
   }) async {
-    final term = query.trim();
+    final term = query.trim().toLowerCase();
     if (term.isEmpty) return const [];
     final db = await _instance;
-    final like = '%${_escapeLike(term)}%';
-    return db.query(
+    final rows = await db.query(
       'chats_cache',
-      where: "account_id = ? AND title LIKE ? ESCAPE '\\'",
-      whereArgs: [accountId, like],
+      where: 'account_id = ? AND title IS NOT NULL',
+      whereArgs: [accountId],
       orderBy: 'last_event_time DESC',
-      limit: limit,
     );
+    return rows
+        .where((row) => (row['title'] as String).toLowerCase().contains(term))
+        .take(limit)
+        .toList();
   }
 
   static Future<List<Map<String, dynamic>>> loadChatsByIds(
@@ -1042,6 +1301,7 @@ class AppDatabase {
     );
   }
 
+  // #***! контакты пачкой как и чаты
   static Future<void> saveContacts(List<Map<String, dynamic>> rows) async {
     final db = await _instance;
     final batch = db.batch();
@@ -1103,6 +1363,18 @@ class AppDatabase {
     );
   }
 
+  static Future<void> deleteContacts(int accountId, List<int> ids) async {
+    if (ids.isEmpty) return;
+    final db = await _instance;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    await db.delete(
+      'contacts',
+      where: 'account_id = ? AND id IN ($placeholders)',
+      whereArgs: [accountId, ...ids],
+    );
+  }
+
+  // #***! сообщения пачкой
   static Future<void> saveMessages(List<Map<String, dynamic>> rows) async {
     final db = await _instance;
     await db.transaction((txn) async {
@@ -1118,6 +1390,25 @@ class AppDatabase {
     });
   }
 
+  static Future<bool> updateSendingMessageStatus(
+    int accountId,
+    int chatId,
+    String messageId,
+    String status,
+  ) async {
+    final db = await _instance;
+    final changed = await db.update(
+      'messages',
+      {'status': status},
+      where:
+          'account_id = ? AND chat_id = ? AND id = ? '
+          "AND status = 'sending' AND deleted = 0",
+      whereArgs: [accountId, chatId, messageId],
+    );
+    return changed != 0;
+  }
+
+  // #***! дальше выборки истории, с конца до сообщения между и вокруг
   static Future<List<Map<String, dynamic>>> loadMessages(
     int accountId,
     int chatId, {
@@ -1178,6 +1469,7 @@ class AppDatabase {
     );
   }
 
+  // #***! вокруг нужно для перехода по ответу, грузим окно с обеих сторон
   static Future<List<Map<String, dynamic>>> loadMessagesAround(
     int accountId,
     int chatId, {
@@ -1207,6 +1499,7 @@ class AppDatabase {
     return [...newer.reversed, ...older];
   }
 
+  // #***! удалённое не стираем а помечаем, с настройкой его ещё можно глянуть
   static Future<void> markMessageDeleted(
     int accountId,
     int chatId,
@@ -1244,10 +1537,85 @@ class AppDatabase {
 
   static Future<void> clearMessages(int accountId, int chatId) async {
     final db = await _instance;
-    await db.delete(
-      'messages',
+    await db.transaction((txn) async {
+      await txn.delete(
+        'messages',
+        where: 'account_id = ? AND chat_id = ?',
+        whereArgs: [accountId, chatId],
+      );
+      await txn.delete(
+        'message_ranges',
+        where: 'account_id = ? AND chat_id = ?',
+        whereArgs: [accountId, chatId],
+      );
+    });
+  }
+
+  static Future<MessageRanges> loadMessageRanges(
+    int accountId,
+    int chatId,
+  ) async {
+    final db = await _instance;
+    final rows = await db.query(
+      'message_ranges',
+      columns: ['start_time', 'end_time'],
       where: 'account_id = ? AND chat_id = ?',
       whereArgs: [accountId, chatId],
+    );
+    return MessageRanges([
+      for (final row in rows)
+        MessageRange(row['start_time'] as int, row['end_time'] as int),
+    ]);
+  }
+
+  static Future<void> addMessageRange(
+    int accountId,
+    int chatId,
+    MessageRange range,
+  ) async {
+    final db = await _instance;
+    await db.transaction((txn) async {
+      final rows = await txn.query(
+        'message_ranges',
+        columns: ['start_time', 'end_time'],
+        where: 'account_id = ? AND chat_id = ?',
+        whereArgs: [accountId, chatId],
+      );
+      final merged = MessageRanges.merge([
+        for (final row in rows)
+          MessageRange(row['start_time'] as int, row['end_time'] as int),
+      ], range);
+      await txn.delete(
+        'message_ranges',
+        where: 'account_id = ? AND chat_id = ?',
+        whereArgs: [accountId, chatId],
+      );
+      final batch = txn.batch();
+      for (final r in merged) {
+        batch.insert('message_ranges', {
+          'account_id': accountId,
+          'chat_id': chatId,
+          'start_time': r.start,
+          'end_time': r.end,
+        });
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  static Future<void> extendMessageRange(
+    int accountId,
+    int chatId, {
+    required int previousLastTime,
+    required int time,
+  }) async {
+    if (time < previousLastTime) return;
+    final db = await _instance;
+    await db.rawUpdate(
+      'UPDATE message_ranges SET end_time = ? '
+      'WHERE account_id = ? AND chat_id = ? '
+      'AND start_time <= ? AND end_time >= ? AND end_time < ?',
+      [time, accountId, chatId, previousLastTime, previousLastTime, time],
     );
   }
 
@@ -1295,6 +1663,56 @@ class AppDatabase {
     );
   }
 
+  // #***! messages.chat_id -> chats_cache FK требует, чтобы чат реально
+  // существовал в кэше — используется симулятором нагрузки, чтобы не
+  // ловить сырое исключение FOREIGN KEY constraint failed
+  static Future<bool> chatExistsInCache(int accountId, int chatId) async {
+    final db = await _instance;
+    final rows = await db.query(
+      'chats_cache',
+      columns: ['id'],
+      where: 'account_id = ? AND id = ?',
+      whereArgs: [accountId, chatId],
+      limit: 1,
+    );
+    return rows.isNotEmpty;
+  }
+
+  // #***! чистка синтетических сообщений от симулятора нагрузки (debug-меню)
+  static Future<void> deleteSyntheticMessages(
+    int accountId,
+    int chatId, {
+    String prefix = 'sim_',
+  }) async {
+    final db = await _instance;
+    await db.delete(
+      'messages',
+      where: 'account_id = ? AND chat_id = ? AND id LIKE ?',
+      whereArgs: [accountId, chatId, '$prefix%'],
+    );
+  }
+
+  static Future<void> deleteMessages(
+    int accountId,
+    int chatId,
+    List<String> messageIds,
+  ) async {
+    if (messageIds.isEmpty) return;
+    final db = await _instance;
+    await db.transaction((txn) async {
+      final batch = txn.batch();
+      for (final id in messageIds) {
+        batch.delete(
+          'messages',
+          where: 'account_id = ? AND chat_id = ? AND id = ?',
+          whereArgs: [accountId, chatId, id],
+        );
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  // #***! неотправленные, их подхватит outbox при коннекте
   static Future<List<Map<String, dynamic>>> loadPendingMessages(
     int accountId,
   ) async {

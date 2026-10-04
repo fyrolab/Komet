@@ -21,9 +21,13 @@ import '../../widgets/adaptive_shell.dart';
 import '../../widgets/sheet_helpers.dart';
 import '../../widgets/small_spinner.dart';
 import '../../../backend/api.dart';
+import '../../../backend/modules/account.dart';
+import '../../../core/utils/logger.dart';
 import '../../../core/protocol/packet.dart';
 import '../../../main.dart';
 import '../../../core/config/app_frost.dart';
+import '../../../core/config/build_profile.dart';
+import '../../../core/config/review_access.dart';
 import '../../../core/config/app_shape.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -40,6 +44,9 @@ class _LoginScreenState extends State<LoginScreen> {
   late CountryName _selectedCountry;
   bool _isPhoneValid = false;
   bool _isTOSRead = false;
+  // #***! экспериментально: представляемся веб-клиентом, чтобы код пришёл по SMS
+  late bool _alwaysSendSms = api.webHandshake;
+  bool _switchingSmsMode = false;
   String? _phoneError;
   Timer? _phoneErrorTimer;
   int _logoTapCount = 0;
@@ -54,7 +61,8 @@ class _LoginScreenState extends State<LoginScreen> {
     super.initState();
     _sessionState = api.state;
     if (api.state == SessionState.disconnected) {
-      unawaited(api.connect());
+      // #***! экран входа по телефону — сокет без токена, прошлая версия
+      unawaited(api.connect(authenticated: false, web: _alwaysSendSms));
     }
     _stateSub = api.stateStream.listen((state) {
       if (mounted) setState(() => _sessionState = state);
@@ -64,15 +72,135 @@ class _LoginScreenState extends State<LoginScreen> {
     _checkTOS();
   }
 
+  // #***! режим зашит в рукопожатие, так что переподнимаем сессию целиком
+  Future<void> _setAlwaysSendSms(bool value) async {
+    if (_switchingSmsMode) return;
+    setState(() {
+      _alwaysSendSms = value;
+      _switchingSmsMode = true;
+    });
+    try {
+      await api.disconnect();
+      await api.connect(authenticated: false, web: value);
+    } catch (e) {
+      if (!mounted) return;
+      showCustomNotification(
+        context,
+        AppLocalizations.of(context)!.loginScreenReconnectFailed('$e'),
+      );
+    } finally {
+      if (mounted) setState(() => _switchingSmsMode = false);
+    }
+  }
+
+  // #***! предупреждение перед эксперим. SMS-входом: true=Принять, false=Отмена,
+  // null=закрыли мимо (галочку не трогаем, но и дальше не идём)
+  Future<bool?> _showExperimentalSmsWarning() {
+    return showGeneralDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: '',
+      barrierColor: AppFrost.scrim(),
+      transitionDuration: const Duration(milliseconds: 250),
+      pageBuilder: (context, anim1, anim2) => const SizedBox.shrink(),
+      transitionBuilder: (context, anim1, anim2, child) {
+        final cs = Theme.of(context).colorScheme;
+        final l10n = AppLocalizations.of(context)!;
+        final curve = Curves.easeOutQuart.transform(anim1.value);
+        return Opacity(
+          opacity: anim1.value,
+          child: Transform.translate(
+            offset: Offset(0, 20 * (1 - curve)),
+            child: Transform.scale(
+              scale: 0.8 + (0.2 * curve),
+              child: AlertDialog(
+                backgroundColor: cs.surfaceContainerHigh,
+                surfaceTintColor: Colors.transparent,
+                shape: AppShape.dialogBorder,
+                contentPadding: const EdgeInsets.fromLTRB(24, 24, 24, 8),
+                actionsPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      l10n.loginScreenSmsWarningTitle,
+                      style: TextStyle(
+                        color: cs.error,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      l10n.loginScreenSmsWarningBody,
+                      style: TextStyle(
+                        color: cs.onSurface,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w400,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
+                actions: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context, false),
+                        child: Text(
+                          l10n.chatInfoActionCancel,
+                          style: TextStyle(
+                            color: cs.onSurfaceVariant,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.pop(context, true),
+                        child: Text(
+                          l10n.e2eeAccept,
+                          style: TextStyle(
+                            color: cs.primary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _onBackPressed() async {
     final returnId = widget.returnToAccountId;
     if (returnId != null) {
       await resetDigitalIdSession();
       try {
         await accountModule.switchAccount(returnId);
-      } catch (_) {
+      } on AccountSessionLostException {
         if (!mounted) return;
-        showCustomNotification(context, 'Не удалось переключить аккаунт');
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.accountSessionLostTitle,
+        );
+        return;
+      } catch (e) {
+        logger.w('Возврат на аккаунт $returnId не удался: $e');
+        if (!mounted) return;
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.accountSwitchFailed,
+        );
         return;
       }
       if (!mounted) return;
@@ -113,6 +241,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _onLogoTap() {
+    if (!BuildProfile.devTools) return;
     _logoTapTimer?.cancel();
     _logoTapTimer = Timer(const Duration(milliseconds: 600), () {
       _logoTapCount = 0;
@@ -249,6 +378,19 @@ class _LoginScreenState extends State<LoginScreen> {
         return StatefulBuilder(
           builder: (context, setModalState) {
             final cs = Theme.of(context).colorScheme;
+            void trackReading(ScrollMetrics metrics) {
+              if (_isTOSRead) return;
+              final newProgress = metrics.maxScrollExtent > 0
+                  ? (metrics.pixels / metrics.maxScrollExtent).clamp(0.0, 1.0)
+                  : 1.0;
+              if (newProgress >= 0.99) {
+                _markTOSRead();
+                setModalState(() => progress = 1.0);
+              } else {
+                setModalState(() => progress = newProgress);
+              }
+            }
+
             return DraggableScrollableSheet(
               initialChildSize: 0.7,
               minChildSize: 0.5,
@@ -280,42 +422,31 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     const SizedBox(height: 16),
                     Expanded(
-                      child: NotificationListener<ScrollUpdateNotification>(
-                        onNotification:
-                            (ScrollUpdateNotification notification) {
-                              if (_isTOSRead) return false;
-                              final metrics = notification.metrics;
-                              if (metrics.maxScrollExtent > 0) {
-                                double newProgress =
-                                    metrics.pixels / metrics.maxScrollExtent;
-                                newProgress = newProgress.clamp(0.0, 1.0);
-                                if (newProgress >= 0.99 && !_isTOSRead) {
-                                  _markTOSRead();
-                                  setModalState(() {
-                                    progress = 1.0;
-                                  });
-                                } else {
-                                  setModalState(() {
-                                    progress = newProgress;
-                                  });
-                                }
-                              }
-                              return false;
-                            },
-                        child: ListView(
-                          controller: scrollController,
-                          children: [
-                            Text(
-                              termsOfServiceBody(termsLocale),
-                              style: TextStyle(
-                                color: cs.onSurfaceVariant,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w400,
-                                height: 1.5,
+                      child: NotificationListener<ScrollMetricsNotification>(
+                        onNotification: (notification) {
+                          trackReading(notification.metrics);
+                          return false;
+                        },
+                        child: NotificationListener<ScrollUpdateNotification>(
+                          onNotification: (notification) {
+                            trackReading(notification.metrics);
+                            return false;
+                          },
+                          child: ListView(
+                            controller: scrollController,
+                            children: [
+                              Text(
+                                termsOfServiceBody(termsLocale),
+                                style: TextStyle(
+                                  color: cs.onSurfaceVariant,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w400,
+                                  height: 1.5,
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 32),
-                          ],
+                              const SizedBox(height: 32),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -475,10 +606,34 @@ class _LoginScreenState extends State<LoginScreen> {
                               '${_selectedCountry.phoneCode}${_phoneController.text}';
 
                           if (!_isOnline) {
-                            _showPhoneError(
-                              'Нет соединения с сервером. Подождите подключения.',
+                            _showPhoneError(l10n.loginScreenOfflineWait);
+                            return;
+                          }
+
+                          if (ReviewAccess.matchesPhone(fullPhone)) {
+                            Navigator.push(
+                              screenContext,
+                              MaterialPageRoute(
+                                builder: (context) => CodeConfirmationScreen.review(
+                                  phoneNumber:
+                                      '${_selectedCountry.phoneCode} $formattedPhone',
+                                  rawPhone: fullPhone,
+                                ),
+                              ),
                             );
                             return;
+                          }
+
+                          // #***! эксперим. SMS-вход: предупреждаем про сброс
+                          // сессий, Отмена снимает галочку и не пускает дальше
+                          if (_alwaysSendSms) {
+                            final choice = await _showExperimentalSmsWarning();
+                            if (choice == false) {
+                              await _setAlwaysSendSms(false);
+                              return;
+                            }
+                            if (choice != true) return;
+                            if (!screenContext.mounted) return;
                           }
 
                           try {
@@ -502,7 +657,7 @@ class _LoginScreenState extends State<LoginScreen> {
                             if (!screenContext.mounted) return;
                             _showPhoneError(
                               isSessionStateError(e)
-                                  ? 'Нет соединения с сервером. Попробуйте ещё раз.'
+                                  ? l10n.loginScreenOfflineRetry
                                   : e.toString(),
                             );
                           }
@@ -536,7 +691,10 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _notifyConnecting() {
-    showCustomNotification(context, 'Подключаемся к серверу, секунду…');
+    showCustomNotification(
+      context,
+      AppLocalizations.of(context)!.loginScreenConnecting,
+    );
   }
 
   void _showServerSettingsSheet(BuildContext context) {
@@ -582,26 +740,27 @@ class _LoginScreenState extends State<LoginScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                ListTile(
-                  leading: Icon(Symbols.security, color: cs.onSurface),
-                  title: Text(
-                    l10n.loginSpoofRedacted,
-                    style: TextStyle(
-                      color: cs.onSurface,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  onTap: () {
-                    Navigator.pop(sheetContext);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const SpoofScreen(),
+                if (BuildProfile.spoofUi)
+                  ListTile(
+                    leading: Icon(Symbols.security, color: cs.onSurface),
+                    title: Text(
+                      l10n.loginSpoofRedacted,
+                      style: TextStyle(
+                        color: cs.onSurface,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
                       ),
-                    );
-                  },
-                ),
+                    ),
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const SpoofScreen(),
+                        ),
+                      );
+                    },
+                  ),
                 ListTile(
                   leading: Icon(Symbols.vpn_lock, color: cs.onSurface),
                   title: Text(
@@ -657,56 +816,44 @@ class _LoginScreenState extends State<LoginScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                ListTile(
-                  leading: Icon(Symbols.qr_code_2, color: cs.onSurface),
-                  title: Text(
-                    l10n.loginSignInWithQr,
-                    style: TextStyle(
-                      color: cs.onSurface,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  onTap: () {
-                    Navigator.pop(context);
-                  },
-                ),
-                ListTile(
-                  leading: Icon(Symbols.key, color: cs.onSurface),
-                  title: Text(
-                    l10n.loginSignInWithToken,
-                    style: TextStyle(
-                      color: cs.onSurface,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  onTap: () {
-                    Navigator.pop(context);
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => TokenLoginScreen(
-                          returnToAccountId: widget.returnToAccountId,
-                        ),
+                if (BuildProfile.qrLogin)
+                  ListTile(
+                    leading: Icon(Symbols.qr_code_2, color: cs.onSurface),
+                    title: Text(
+                      l10n.loginSignInWithQr,
+                      style: TextStyle(
+                        color: cs.onSurface,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
                       ),
-                    );
-                  },
-                ),
-                ListTile(
-                  leading: Icon(Symbols.description, color: cs.onSurface),
-                  title: Text(
-                    l10n.loginSignInWithSessionFile,
-                    style: TextStyle(
-                      color: cs.onSurface,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
                     ),
+                    onTap: () {
+                      Navigator.pop(context);
+                    },
                   ),
-                  onTap: () {
-                    Navigator.pop(context);
-                  },
-                ),
+                if (BuildProfile.tokenLogin)
+                  ListTile(
+                    leading: Icon(Symbols.key, color: cs.onSurface),
+                    title: Text(
+                      l10n.loginSignInWithToken,
+                      style: TextStyle(
+                        color: cs.onSurface,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    onTap: () {
+                      Navigator.pop(context);
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => TokenLoginScreen(
+                            returnToAccountId: widget.returnToAccountId,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
               ],
             ),
           ),
@@ -928,19 +1075,52 @@ class _LoginScreenState extends State<LoginScreen> {
                                   )
                                 : const SizedBox.shrink(),
                           ),
-                          const SizedBox(height: 16),
-                          TextButton(
-                            onPressed: () => _showOtherLoginMethods(context),
-                            child: Text(
-                              l10n.loginOtherSignInMethods,
-                              style: TextStyle(
-                                color: cs.primary,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w400,
-                                height: 1.4,
+                          const SizedBox(height: 4),
+                          InkWell(
+                            onTap: _switchingSmsMode
+                                ? null
+                                : () => _setAlwaysSendSms(!_alwaysSendSms),
+                            borderRadius: BorderRadius.circular(12),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      l10n.loginScreenAlwaysSendSms,
+                                      style: TextStyle(
+                                        color: cs.onSurface,
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w400,
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Switch(
+                                    value: _alwaysSendSms,
+                                    onChanged: _switchingSmsMode
+                                        ? null
+                                        : _setAlwaysSendSms,
+                                  ),
+                                ],
                               ),
                             ),
                           ),
+                          const SizedBox(height: 12),
+                          if (BuildProfile.qrLogin || BuildProfile.tokenLogin)
+                            TextButton(
+                              onPressed: () => _showOtherLoginMethods(context),
+                              child: Text(
+                                l10n.loginOtherSignInMethods,
+                                style: TextStyle(
+                                  color: cs.primary,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w400,
+                                  height: 1.4,
+                                ),
+                              ),
+                            ),
                           const Spacer(),
                           Row(
                             crossAxisAlignment: CrossAxisAlignment.end,

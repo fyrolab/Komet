@@ -7,6 +7,8 @@ import 'package:material_symbols_icons/symbols.dart';
 import '../../../backend/modules/webapp.dart';
 import '../../../core/storage/spoofing_service.dart';
 import '../../../core/utils/link_opener.dart';
+import '../../../core/utils/logger.dart';
+import '../../../l10n/app_localizations.dart';
 import '../../../main.dart' show api;
 import '../../widgets/confirm_dialog.dart';
 import '../../widgets/connection_status.dart';
@@ -130,7 +132,22 @@ class _WebAppScreenState extends State<WebAppScreen> {
 
   void _closeFromWebApp() {
     if (!mounted) return;
-    Navigator.of(context).maybePop();
+    Navigator.of(context).pop();
+  }
+
+  Future<void> _closeByUser() async {
+    final bridge = _bridge;
+    if (bridge != null && bridge.needsCloseConfirmation) {
+      final l10n = AppLocalizations.of(context)!;
+      final confirmed = await showConfirmDialog(
+        context,
+        title: widget.title,
+        message: l10n.webAppScreenCloseConfirm,
+        confirmLabel: l10n.videoViewerClose,
+      );
+      if (!confirmed || !mounted) return;
+    }
+    Navigator.of(context).pop();
   }
 
   Future<bool> _handleBack() async {
@@ -145,11 +162,12 @@ class _WebAppScreenState extends State<WebAppScreen> {
       return false;
     }
     if (bridge != null && bridge.needsCloseConfirmation && mounted) {
+      final l10n = AppLocalizations.of(context)!;
       return showConfirmDialog(
         context,
         title: widget.title,
-        message: 'Закрыть мини-приложение?',
-        confirmLabel: 'Закрыть',
+        message: l10n.webAppScreenCloseConfirm,
+        confirmLabel: l10n.videoViewerClose,
       );
     }
     return true;
@@ -211,7 +229,7 @@ class _WebAppScreenState extends State<WebAppScreen> {
           title: Text(widget.title),
           leading: IconButton(
             icon: const Icon(Symbols.close),
-            onPressed: () => Navigator.of(context).maybePop(),
+            onPressed: _closeByUser,
           ),
           actions: [
             IconButton(
@@ -300,6 +318,11 @@ class _WebAppScreenState extends State<WebAppScreen> {
         setState(() => _progress = progress / 100);
       },
       onReceivedError: (controller, request, error) {
+        final host = request.url.host;
+        logger.w(
+          'WebView ${widget.title}: ${error.type} ${error.description} '
+          '($host${request.isForMainFrame ?? false ? ', главный фрейм' : ''})',
+        );
         if (!mounted) return;
         if (request.isForMainFrame ?? false) {
           setState(() => _loadError = error.description);

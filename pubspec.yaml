@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.5.19+20
+version: 0.5.22+23
 
 environment:
   sdk: ^3.10.4
@@ -39,11 +39,23 @@ dependencies:
   # app build time and pulled from that repo by git tag.
   kolibri: ^0.1.4
 
-  # Rust message-encryption core — Argon2id + ChaCha20-Poly1305, output encoded
-  # as lowercase Cyrillic base32. Separate from kolibri: that is vendored
-  # transport, this is Komet's own crypto.
+  # Пробрасывается только ради RustStreamSink: kolibri 0.1.4 не отдаёт isPwa и
+  # headerUserAgent через openSessionWithWireLog, а веб-хэндшейку они нужны, так
+  # что SessionOptions собираем сами. Версия обязана совпадать с пином kolibri.
+  flutter_rust_bridge: 2.12.0
+
+  # Message-encryption core (C over monocypher): legacy passphrase scheme and
+  # v2 end-to-end encryption. KometTeam/crypto-core is a git submodule at
+  # native/crypto-core, so the version is pinned by the submodule commit;
+  # run `git submodule update --init --recursive` after cloning.
   komet_crypto:
-    path: native/komet_crypto
+    path: native/crypto-core/flutter/komet_crypto
+
+  # Lottie renderer (tlottie, Rust) for animated stickers, animoji and
+  # reactions — local FFI plugin; its wrapper crate pins tlottie by git rev and
+  # cargokit compiles it at app build time, like kolibri.
+  komet_tlottie:
+    path: native/komet_tlottie
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -71,6 +83,7 @@ dependencies:
   flutter_secure_storage: ^10.3.1
   package_info_plus: ^9.0.1
   mobile_scanner: ^7.2.0
+  qr: ^4.0.0
   flutter_contacts: ^1.1.9+2
   cached_network_image: ^3.4.1
   flutter_cache_manager: ^3.4.1
@@ -90,21 +103,27 @@ dependencies:
   opus_dart: ^3.0.1
   opus_flutter_android: ^3.0.1
   ogg_opus_player: ^0.8.0
-  video_player_media_kit: ^2.0.0
+  audio_service: ^0.18.19
+  audio_session: ^0.2.4
+  just_audio: ^0.10.6
+  just_audio_media_kit: ^2.1.0
+  media_kit: ^1.2.6
+  media_kit_video: ^2.0.1
+  video_player_platform_interface: ^6.7.0
   media_kit_libs_windows_video: ^1.0.11
   media_kit_libs_linux: ^1.2.1
   media_kit_libs_macos_video: ^1.1.4
   sensors_plus: ^7.1.0
   smart_auth: ^3.2.0
   flutter_svg: ^2.0.10
+  fjs: ^3.3.0
+  cryptography: ^2.7.0
+  local_auth: ^3.0.2
+  visibility_detector: ^0.4.0+2
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-
-  # Needed by test/chat_crypto_roundtrip_test.dart to open the built
-  # komet_crypto shared library directly.
-  flutter_rust_bridge: 2.12.0
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -141,6 +160,7 @@ flutter:
 
   shaders:
     - shaders/liquid_glass.frag
+    - shaders/mesh_gradient.frag
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in
@@ -154,6 +174,9 @@ flutter:
     - assets/lottie/
     - assets/wallpapers/patterns/
     - assets/debug/
+    - assets/plugins/nekos/
+    - assets/plugins/info/
+    - assets/plugins/weather/
 
   fonts:
     - family: Inter

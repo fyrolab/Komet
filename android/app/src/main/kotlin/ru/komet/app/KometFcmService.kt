@@ -38,6 +38,9 @@ class KometFcmService : FirebaseMessagingService() {
             return
         }
         KometNotifier(applicationContext).handle(data)
+        if (type != "InboundCall" && type != "CallFinished") {
+            LauncherBadge.countPush(applicationContext, data["mc"]?.toLongOrNull() ?: 0L)
+        }
     }
 }
 
@@ -122,6 +125,21 @@ class KometNotifier(private val ctx: Context) {
 
         render(chatId, notifId, meta, history, alertOnce = false)
         updateSummary(notifId, senderName, text, ts, active)
+    }
+
+    fun cancelChat(chatId: Long) {
+        val notifId = notifIdOf(chatId)
+        manager().cancel(notifId)
+        clearChat(chatId)
+        syncSummary(notifId, null)
+    }
+
+    fun notifiedChats(): List<Long> {
+        val active = activeIds()
+        return pushPrefs().all.keys
+            .filter { it.startsWith("meta_") }
+            .mapNotNull { it.removePrefix("meta_").toLongOrNull() }
+            .filter { active.contains(notifIdOf(it)) }
     }
 
     // Сообщение отредактировали — правим текст в уже висящем уведомлении.
@@ -404,13 +422,7 @@ class KometNotifier(private val ctx: Context) {
     }
 
     private fun chatIntent(chatId: Long): Intent {
-        val launcher = ctx.packageManager
-            .getLaunchIntentForPackage(ctx.packageName)?.component
-        val intent = if (launcher != null) {
-            Intent().setComponent(launcher)
-        } else {
-            Intent(ctx, MainActivity::class.java)
-        }
+        val intent = LaunchIntents.app(ctx)
         intent.addFlags(
             Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_SINGLE_TOP or

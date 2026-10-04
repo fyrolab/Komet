@@ -10,7 +10,6 @@ class TokenStorage {
   static const _activeAccountKey = 'active_account_id';
 
   static const _secure = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
     iOptions: IOSOptions(
       accessibility: KeychainAccessibility.first_unlock_this_device,
       synchronizable: false,
@@ -80,6 +79,14 @@ class TokenStorage {
       return legacy;
     }
     return null;
+  }
+
+  static Future<String?> tryReadToken(int accountId) async {
+    try {
+      return await readToken(accountId);
+    } on PlatformException {
+      return null;
+    }
   }
 
   static Future<void> deleteToken(int accountId) => _tokens.delete(accountId);

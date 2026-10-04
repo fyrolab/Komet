@@ -3,11 +3,14 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
+import '../../../core/config/app_badge.dart';
 import '../../../core/push/fkm_bridge.dart';
 import '../../../core/push/fkm_controller.dart';
+import '../../../core/push/launcher_badge.dart';
 import '../../../core/utils/haptics.dart';
 import '../../../l10n/app_localizations.dart';
-import '../../../main.dart' show accountModule, isOnemeFlavor;
+import '../../../core/config/build_profile.dart';
+import '../../../main.dart' show accountModule;
 import '../../widgets/confirm_dialog.dart';
 import '../../widgets/connection_status.dart';
 import '../../widgets/reload_on_reconnect.dart';
@@ -109,7 +112,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
     }
     if (_fkmBusy) return;
 
-    if (value && isOnemeFlavor) {
+    if (value && BuildProfile.firebasePush) {
       final confirmed = await showConfirmDialog(
         context,
         title: l10n.notificationsFkmAlreadyHasFcm,
@@ -179,27 +182,42 @@ class _NotificationsScreenState extends State<NotificationsScreen>
                     ),
                     const SizedBox(height: 20),
                   ],
-                  SectionHeader(
-                    l10n.notificationsFkmSectionTitle,
-                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-                    fontSize: 14,
-                  ),
-                  SettingsCard(
-                    children: [
-                      ValueListenableBuilder<bool>(
-                        valueListenable: FkmController.instance.enabled,
-                        builder: (context, fkmEnabled, _) => SettingsToggleTile(
-                          icon: Symbols.notifications_active,
-                          label: l10n.notificationsFkmEnableLabel,
-                          subtitle: l10n.notificationsFkmEnableSubtitle,
-                          value: fkmEnabled,
-                          enabled: !_fkmBusy,
-                          onChanged: _onFkmChanged,
+                  if (FkmController.instance.isSupported) ...[
+                    SectionHeader(
+                      l10n.notificationsFkmSectionTitle,
+                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                      fontSize: 14,
+                    ),
+                    SettingsCard(
+                      children: [
+                        ValueListenableBuilder<bool>(
+                          valueListenable: FkmController.instance.enabled,
+                          builder: (context, fkmEnabled, _) =>
+                              SettingsToggleTile(
+                                icon: Symbols.notifications_active,
+                                label: l10n.notificationsFkmEnableLabel,
+                                subtitle: l10n.notificationsFkmEnableSubtitle,
+                                value: fkmEnabled,
+                                enabled: !_fkmBusy,
+                                onChanged: _onFkmChanged,
+                              ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+                  ],
+                  if (!Platform.isAndroid && !Platform.isIOS)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 16),
+                      child: Text(
+                        l10n.notificationsDesktopNote,
+                        style: TextStyle(
+                          color: cs.onSurfaceVariant,
+                          fontSize: 13,
+                          height: 1.4,
                         ),
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
+                    ),
                   SectionHeader(
                     l10n.notificationsMainSectionTitle,
                     padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
@@ -252,6 +270,7 @@ class _NotificationsScreenState extends State<NotificationsScreen>
                     ],
                   ),
                   const SizedBox(height: 20),
+                  const _LauncherBadgeSection(),
                   SectionHeader(
                     l10n.notificationsAdditionalSectionTitle,
                     padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
@@ -301,6 +320,67 @@ class _NotificationsScreenState extends State<NotificationsScreen>
                 ],
               ),
       ),
+    );
+  }
+}
+
+class _LauncherBadgeSection extends StatelessWidget {
+  const _LauncherBadgeSection();
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return ValueListenableBuilder<bool>(
+      valueListenable: LauncherBadge.instance.supported,
+      builder: (context, supported, _) {
+        if (!supported) return const SizedBox.shrink();
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SectionHeader(
+              l10n.notificationsBadgeSectionTitle,
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+              fontSize: 14,
+            ),
+            ListenableBuilder(
+              listenable: Listenable.merge([
+                AppBadge.enabled.current,
+                AppBadge.includeMuted.current,
+                AppBadge.countMessages.current,
+              ]),
+              builder: (context, _) {
+                final enabled = AppBadge.enabled.current.value;
+                return SettingsCard(
+                  children: [
+                    SettingsToggleTile(
+                      icon: Symbols.app_badging,
+                      label: l10n.notificationsBadgeLabel,
+                      value: enabled,
+                      onChanged: AppBadge.enabled.save,
+                    ),
+                    SettingsToggleTile(
+                      icon: Symbols.notifications_off,
+                      label: l10n.notificationsBadgeMutedLabel,
+                      value: AppBadge.includeMuted.current.value,
+                      enabled: enabled,
+                      onChanged: AppBadge.includeMuted.save,
+                    ),
+                    SettingsToggleTile(
+                      icon: Symbols.mark_chat_unread,
+                      label: l10n.notificationsBadgeMessagesLabel,
+                      subtitle: l10n.notificationsBadgeMessagesSubtitle,
+                      value: AppBadge.countMessages.current.value,
+                      enabled: enabled,
+                      onChanged: AppBadge.countMessages.save,
+                    ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 20),
+          ],
+        );
+      },
     );
   }
 }

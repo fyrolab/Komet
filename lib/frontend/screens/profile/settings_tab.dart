@@ -3,30 +3,41 @@ import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../../../core/cache/self_presence.dart';
+import '../../../core/config/build_profile.dart';
 import '../../../core/config/app_colors.dart';
 import '../../../core/config/komet_settings.dart';
 import '../../../core/config/app_show_extra_info.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/utils/format.dart';
+import '../../../core/utils/logger.dart';
 import '../../../core/utils/update_checker.dart';
 import '../../../l10n/app_localizations.dart';
 import '../../../main.dart';
+import '../../../backend/modules/contacts.dart';
 import '../../widgets/animated_slash_icon.dart';
-import '../../widgets/avatar_history_screen.dart';
+import 'media_devices_screen.dart';
+import '../../widgets/attachment/photo_hero.dart';
+import '../../widgets/avatar_gallery.dart';
+import '../../widgets/photo_viewer.dart';
+import '../../widgets/avatar_photo_actions.dart';
 import '../../widgets/connection_status.dart';
+import '../../widgets/glossy_pill.dart';
 import '../../widgets/info_action_sheet.dart';
 import '../../widgets/komet_avatar.dart';
 import '../../widgets/profile_header_scroll.dart';
+import '../../widgets/reload_on_reconnect.dart';
 import '../../widgets/settings_card.dart';
 import '../../widgets/sheet_helpers.dart';
 import '../../widgets/small_spinner.dart';
 import '../../widgets/custom_notification.dart';
 import '../../widgets/update_dialog.dart';
+import '../chats/chat_list_screen.dart' show activeNavTab;
 import '../auth/login_screen.dart';
 import '../auth/proxy_settings_sheet.dart';
 import '../../../core/config/app_digital_id_mode.dart';
@@ -35,6 +46,7 @@ import '../digital_id/digital_id_screen.dart';
 import '../digital_id/digital_id_web_screen.dart';
 import '../webapp/web_app_bridge.dart';
 import '../webapp/web_app_screen.dart';
+import 'avatar_carousel.dart';
 import 'cloud_storage_screen.dart';
 import 'customization_section.dart';
 import 'debug_menu_screen.dart';
@@ -44,6 +56,7 @@ import 'edit_profile_screen.dart';
 import 'info_screen.dart';
 import 'komet_settings_screen.dart';
 import 'notifications_screen.dart';
+import 'profile_qr_sheet.dart';
 import 'security_screen.dart';
 import 'spoof_screen.dart';
 import '../../widgets/media_playback_pill.dart';
@@ -59,8 +72,21 @@ class SettingsTab extends StatefulWidget {
   State<SettingsTab> createState() => _SettingsTabState();
 }
 
-class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
+const int _settingsTabIndex = 3;
+const double _headerVignette = 64;
+const int _avatarHistoryPageSize = 50;
+const int _avatarThumbSize = 264;
+
+class _SettingsTabState extends State<SettingsTab>
+    with ReloadOnReconnect, SpectrumSurface {
   ProfileData? _profile;
+  List<String> _avatarUrls = const [];
+  List<int?> _avatarIds = const [];
+  List<AvatarPhoto> _avatarPhotos = const [];
+  int _avatarIndex = 0;
+  bool _avatarForward = true;
+  final GlobalKey _avatarMenuKey = GlobalKey();
+  final GlobalKey _avatarHeroKey = GlobalKey();
   bool _isPhoneVisible = false;
   ScrollController? _scrollController;
   double _headerDelta = 0;
@@ -75,6 +101,12 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
   int _versionSecretTapCount = 0;
   Timer? _versionSecretTapResetTimer;
   StreamSubscription? _profileUpdateSub;
+  bool _avatarsLoading = false;
+
+  @override
+  void reloadAfterReconnect() {
+    if (!_avatarsLoading) unawaited(_loadAvatars());
+  }
 
   @override
   void initState() {
@@ -87,11 +119,30 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
         if (mounted) _loadProfile();
       });
     }
+    activeNavTab.addListener(_onNavTabChanged);
+  }
+
+  // #***! вкладку не размонтируют, поэтому при открытии сами возвращаемся
+  // к шапке: иначе настройки открываются там же, где их закрыли
+  void _onNavTabChanged() {
+    if (!mounted || activeNavTab.value != _settingsTabIndex) return;
+    _resetHeaderScroll();
+  }
+
+  void _resetHeaderScroll() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final c = _scrollController;
+      if (!mounted || c == null || !c.hasClients) return;
+      final target = math.min(_headerDelta, c.position.maxScrollExtent);
+      if ((c.offset - target).abs() < 1) return;
+      c.jumpTo(target);
+    });
   }
 
   @override
   void dispose() {
     _versionSecretTapResetTimer?.cancel();
+    activeNavTab.removeListener(_onNavTabChanged);
     _profileUpdateSub?.cancel();
     _scrollController?.dispose();
     super.dispose();
@@ -179,6 +230,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
   }
 
   void _onVersionLabelTap() {
+    if (!BuildProfile.devTools) return;
     _scheduleVersionSecretTapReset();
     setState(() {
       _versionSecretTapCount++;
@@ -192,19 +244,196 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
 
   Future<void> _loadProfile() async {
     final p = await AppDatabase.loadActiveProfile();
-    if (mounted) setState(() => _profile = p);
+    if (!mounted) return;
+    // #***! фото могли сменить с другого устройства, тогда список истории
+    // в кэше уже неверен и его надо перечитать
+    if (p != null && p.photoId != _profile?.photoId) {
+      ContactsModule.invalidatePhotos(p.id);
+    }
+    setState(() {
+      _profile = p;
+      _rebuildAvatarPhotos();
+    });
+    await _loadAvatars();
+  }
+
+  // #***! список фото нужен вместе с id, а кэшу модуля можно верить:
+  // он сам сбрасывается при загрузке и удалении аватарки
+  Future<void> _loadAvatars() async {
+    final profile = _profile;
+    if (profile == null || profile.id <= 0) return;
+    final ContactPhotos photos;
+    _avatarsLoading = true;
+    try {
+      photos =
+          ContactsModule.cachedPhotos(profile.id) ??
+          await ContactsModule.fetchPhotos(
+            api,
+            profile.id,
+            count: _avatarHistoryPageSize,
+          );
+    } catch (e) {
+      logger.w('Не удалось получить аватарки профиля: $e');
+      return;
+    } finally {
+      _avatarsLoading = false;
+    }
+    if (!mounted) return;
+    final ids = List<int?>.generate(photos.urls.length, (i) => photos.idAt(i));
+    if (listEquals(_avatarUrls, photos.urls) && listEquals(_avatarIds, ids)) {
+      return;
+    }
+    setState(() {
+      _avatarUrls = photos.urls;
+      _avatarIds = ids;
+      _rebuildAvatarPhotos();
+    });
+  }
+
+  // #***! готовый список держим полем: шапка перестраивается на каждом кадре
+  // прокрутки, собирать его в build значило бы мусорить каждый кадр
+  void _rebuildAvatarPhotos() {
+    _avatarPhotos = buildAvatarPhotos(
+      urls: _avatarUrls,
+      ids: _avatarIds,
+      baseUrl: _profile?.baseUrl,
+      mainPhotoId: _profile?.photoId,
+    );
+    _avatarIndex = indexOfMainAvatar(_avatarPhotos, _profile?.photoId);
+  }
+
+  int get _fullAvatarCacheWidth {
+    final width = MediaQuery.sizeOf(context).width;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    return (width * dpr).round().clamp(264, 2048);
+  }
+
+  AvatarPhoto? get _currentAvatar {
+    if (_avatarPhotos.isEmpty) return null;
+    return _avatarPhotos[_avatarIndex.clamp(0, _avatarPhotos.length - 1)
+        .toInt()];
+  }
+
+  void _stepAvatar(int delta) {
+    final next = _avatarIndex + delta;
+    if (next < 0 || next >= _avatarPhotos.length) return;
+    setState(() {
+      _avatarForward = delta > 0;
+      _avatarIndex = next;
+    });
+  }
+
+  void _onAvatarSwipe(DragEndDetails details) {
+    final vx = details.primaryVelocity ?? 0;
+    if (vx.abs() < 120) return;
+    _stepAvatar(vx < 0 ? 1 : -1);
+  }
+
+  String get _fullName {
+    final profile = _profile;
+    if (profile == null) return '';
+    final last = profile.lastName;
+    return last == null || last.isEmpty
+        ? profile.firstName
+        : '${profile.firstName} $last';
+  }
+
+  void _openAvatarViewer(double radius) {
+    final profile = _profile;
+    final current = _currentAvatar;
+    if (profile == null || current == null) return;
+    openAvatarViewer(
+      context,
+      AvatarGallery(
+        contactId: profile.id,
+        name: _fullName,
+        currentUrl: profile.baseUrl ?? '',
+        mainPhotoId: profile.photoId,
+        initialUrl: current.url,
+        initialPhotoId: current.id,
+        onDelete: _removeAvatar,
+      ),
+      origin: () => photoHeroRect(_avatarHeroKey),
+      image: _avatarThumbnail(current.url),
+      radius: BorderRadius.circular(radius),
+    );
+  }
+
+  static ImageProvider _avatarThumbnail(String url) =>
+      ResizeImage.resizeIfNeeded(
+        _avatarThumbSize,
+        _avatarThumbSize,
+        CachedNetworkImageProvider(url),
+      );
+
+  void _openAvatarMenu() {
+    final rect = anchorRectOf(_avatarMenuKey);
+    final current = _currentAvatar;
+    if (rect == null || current == null) return;
+    final id = current.id;
+    showAvatarMenu(
+      context: context,
+      anchorRect: rect,
+      onSave: () => saveAvatarPhoto(context, current.url),
+      onDelete: id == null ? null : () => _deleteAvatar(id),
+    );
+  }
+
+  Future<void> _deleteAvatar(int id) async {
+    if (!await confirmAvatarDeletion(context)) return;
+    if (mounted) await _removeAvatar(id);
+  }
+
+  Future<void> _removeAvatar(int id) async {
+    try {
+      final profile = await accountModule.removeProfilePhoto(id);
+      if (!mounted) return;
+      await _applyProfileAfterDeletion(profile);
+      if (mounted) {
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.settingsTabPhotoDeleted,
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.settingsTabPhotoDeleteFailed('$e'),
+        );
+      }
+    }
+  }
+
+  // #***! сервер сам назначает новую основную, к ней и перелистываем.
+  // Старый список уже неверен: удалённое фото в нём ещё есть, и показывать его
+  // нельзя — до перезагрузки списка живём одной аватаркой из свежего профиля
+  Future<void> _applyProfileAfterDeletion(ProfileData profile) async {
+    setState(() {
+      _profile = profile;
+      _avatarUrls = const [];
+      _avatarIds = const [];
+      _avatarForward = false;
+      _rebuildAvatarPhotos();
+    });
+    await _loadAvatars();
+    if (mounted) KometApp.stateOf(context)?.notifyProfileUpdate();
   }
 
   Future<void> _loadAppVersion() async {
     final info = await PackageInfo.fromPlatform();
     if (!mounted) return;
+    final l10n = AppLocalizations.of(context)!;
     setState(() {
-      _appVersionLabel = 'Версия ${info.version} (${info.buildNumber})';
+      _appVersionLabel = l10n.settingsTabAppVersion(
+        info.version,
+        info.buildNumber,
+      );
     });
   }
 
   Future<void> _checkForUpdates() async {
-    if (_isCheckingForUpdates) return;
+    if (!BuildProfile.selfUpdate || _isCheckingForUpdates) return;
     setState(() => _isCheckingForUpdates = true);
 
     final result = await UpdateChecker.checkNow();
@@ -232,32 +461,31 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
 
   Future<void> _openCloudStorage(BuildContext context) async {
     final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     final ok = await showInfoActionSheet(
       context,
       headerIcon: Symbols.cloud,
-      title: 'Облачное хранилище',
-      subtitle: 'Через МАХ',
+      title: l10n.cloudStorageTitle,
+      subtitle: l10n.settingsTabCloudStorageSubtitle,
       items: [
-        const InfoActionSheetItem(
+        InfoActionSheetItem(
           icon: Symbols.cloud_done,
-          title: 'Работает при белых списках',
-          body: 'Вы сможете передать файл даже при ограниченном интернете.',
+          title: l10n.settingsTabCloudStorageWhitelistTitle,
+          body: l10n.settingsTabCloudStorageWhitelistBody,
         ),
-        const InfoActionSheetItem(
+        InfoActionSheetItem(
           icon: Symbols.inventory_2,
-          title: 'Файлы до 4ГБ, безлимитное количество.',
-          body: 'Можете хранить массивный обьем информации.',
+          title: l10n.settingsTabCloudStorageLimitsTitle,
+          body: l10n.settingsTabCloudStorageLimitsBody,
         ),
         InfoActionSheetItem(
           icon: Symbols.gpp_maybe,
-          title: 'Не обеспечивается конфединциальность файлов',
-          body:
-              'Облачное хранилище работает через ваш аккаунт на сервере МАХ, '
-              'нужные люди всё равно могут его посмотреть.',
+          title: l10n.settingsTabCloudStoragePrivacyTitle,
+          body: l10n.settingsTabCloudStoragePrivacyBody,
           titleColor: cs.error,
         ),
       ],
-      confirmLabel: 'ОК',
+      confirmLabel: l10n.photoEditorOk,
       confirmDelay: const Duration(seconds: 3),
       seenKey: 'cloud_storage_intro_seen',
     );
@@ -270,6 +498,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
 
   Future<void> _confirmLogout() async {
     final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     final confirmed = await showModalBottomSheet<bool>(
       context: context,
       backgroundColor: cs.surfaceContainerHigh,
@@ -283,7 +512,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  'Выйти из аккаунта?',
+                  l10n.settingsTabLogoutConfirmTitle,
                   style: TextStyle(
                     color: cs.onSurface,
                     fontSize: 18,
@@ -292,7 +521,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Данные аккаунта будут удалены с этого устройства.',
+                  l10n.settingsTabLogoutConfirmBody,
                   style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
                 ),
                 const SizedBox(height: 20),
@@ -304,12 +533,12 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: AppShape.buttonBorder,
                   ),
-                  child: const Text('Выйти'),
+                  child: Text(l10n.settingsTabLogoutConfirm),
                 ),
                 const SizedBox(height: 8),
                 TextButton(
                   onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('Отмена'),
+                  child: Text(l10n.chatInfoActionCancel),
                 ),
               ],
             ),
@@ -326,12 +555,18 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
     try {
       await accountModule.logout();
     } catch (e) {
-      if (mounted) showCustomNotification(context, 'Не удалось выйти: $e');
+      if (mounted) {
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.settingsTabLogoutFailed('$e'),
+        );
+      }
       return;
     }
     await resetDigitalIdSession();
     try {
-      await api.connect();
+      // #***! вышли из аккаунта — дальше экран входа по телефону, прошлая версия
+      await api.connect(authenticated: false);
     } catch (_) {}
     if (navState != null) {
       await navState.pushAndRemoveUntil(
@@ -392,6 +627,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                         _buildHeader(ctx, cs, fullName, phone, t),
                   ),
                 ),
+                SliverToBoxAdapter(child: _buildBioCard(cs, l10n)),
                 const SliverToBoxAdapter(
                   child: MediaPlaybackPill(
                     margin: EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -406,31 +642,32 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                         return _buildSection(
                           context,
                           items: [
-                            _SettingsItem(
-                              icon: Symbols.badge,
-                              label: 'Цифровой ID',
-                              onTap: () {
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute(
-                                    builder: (context) =>
-                                        AppDigitalIdNative.current.value ||
-                                            !webViewSupported
-                                        ? const DigitalIdScreen()
-                                        : const DigitalIdWebScreen(),
-                                  ),
-                                );
-                              },
-                            ),
+                            if (BuildProfile.digitalId)
+                              _SettingsItem(
+                                icon: Symbols.badge,
+                                label: l10n.digitalIdTitle,
+                                onTap: () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (context) =>
+                                          AppDigitalIdNative.current.value ||
+                                              !webViewSupported
+                                          ? const DigitalIdScreen()
+                                          : const DigitalIdWebScreen(),
+                                    ),
+                                  );
+                                },
+                              ),
                             _SettingsItem(
                               icon: Symbols.language,
-                              label: 'Войти в Сферум',
+                              label: l10n.settingsTabSferumSignIn,
                               onTap: () {
                                 Navigator.push(
                                   context,
                                   MaterialPageRoute(
                                     builder: (context) => WebAppScreen(
-                                      title: 'Сферум',
+                                      title: l10n.settingsTabSferumTitle,
                                       entryPoint: WebAppEntryPoint.settings,
                                       loader: () => webAppModule.fetchSferum(),
                                     ),
@@ -441,7 +678,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                             if (showExtraInfo)
                               _SettingsItem(
                                 icon: Symbols.info,
-                                label: 'Info',
+                                label: AppLocalizations.of(context)!.infoTitle,
                                 onTap: () {
                                   Navigator.push(
                                     context,
@@ -471,7 +708,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                       items: [
                         _SettingsItem(
                           icon: Symbols.notifications_active,
-                          label: 'Уведомления',
+                          label: l10n.notificationsTitle,
                           onTap: () {
                             Navigator.push(
                               context,
@@ -483,13 +720,26 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                           },
                         ),
                         _SettingsItem(
+                          icon: Symbols.videocam,
+                          label: l10n.mediaDevicesTitle,
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) =>
+                                    const MediaDevicesScreen(),
+                              ),
+                            );
+                          },
+                        ),
+                        _SettingsItem(
                           icon: Symbols.cloud,
-                          label: 'Облачное хранилище [BETA]',
+                          label: l10n.settingsTabCloudStorageBeta,
                           onTap: () => _openCloudStorage(context),
                         ),
                         _SettingsItem(
                           icon: Symbols.vpn_lock,
-                          label: 'Прокси',
+                          label: l10n.proxySettingsTitle,
                           onTap: () {
                             final cs = Theme.of(context).colorScheme;
                             showModalBottomSheet<void>(
@@ -505,21 +755,23 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                             );
                           },
                         ),
-                        _SettingsItem(
-                          icon: Symbols.shield_lock,
-                          label: AppLocalizations.of(context)!.profileMenuSpoof,
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const SpoofScreen(),
-                              ),
-                            );
-                          },
-                        ),
+                        if (BuildProfile.spoofUi)
+                          _SettingsItem(
+                            icon: Symbols.shield_lock,
+                            label: AppLocalizations.of(context)!
+                                .profileMenuSpoof,
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => const SpoofScreen(),
+                                ),
+                              );
+                            },
+                          ),
                         _SettingsItem(
                           icon: Symbols.lock,
-                          label: 'Безопасность',
+                          label: l10n.securityTitle,
                           onTap: () {
                             Navigator.push(
                               context,
@@ -534,7 +786,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                         ),
                         _SettingsItem(
                           icon: Symbols.devices,
-                          label: 'Устройства',
+                          label: l10n.devicesTitle,
                           onTap: () {
                             Navigator.push(
                               context,
@@ -582,7 +834,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                                 items: [
                                   _SettingsItem(
                                     icon: Symbols.construction,
-                                    label: 'Для разработчиков',
+                                    label: l10n.settingsTabDevelopers,
                                     onTap: () {
                                       Navigator.push(
                                         context,
@@ -608,15 +860,16 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                     child: _buildSection(
                       context,
                       items: [
-                        _SettingsItem(
-                          icon: Symbols.system_update,
-                          label: _isCheckingForUpdates
-                              ? l10n.updateChecking
-                              : l10n.updateCheck,
-                          onTap: _isCheckingForUpdates
-                              ? null
-                              : _checkForUpdates,
-                        ),
+                        if (BuildProfile.selfUpdate)
+                          _SettingsItem(
+                            icon: Symbols.system_update,
+                            label: _isCheckingForUpdates
+                                ? l10n.updateChecking
+                                : l10n.updateCheck,
+                            onTap: _isCheckingForUpdates
+                                ? null
+                                : _checkForUpdates,
+                          ),
                         _SettingsItem(
                           leading: Image.asset(
                             'assets/komet.png',
@@ -637,7 +890,7 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                         ),
                         _SettingsItem(
                           icon: Symbols.logout,
-                          label: 'Выйти из аккаунта',
+                          label: l10n.settingsTabLogout,
                           tintColor: cs.error,
                           onTap: _confirmLogout,
                         ),
@@ -729,12 +982,8 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
               Positioned.fromRect(
                 rect: avatarRect,
                 child: GestureDetector(
-                  onTap: () => AvatarHistoryScreen.open(
-                    context,
-                    contactId: _profile?.id ?? 0,
-                    name: name,
-                    currentAvatarUrl: _profile?.baseUrl,
-                  ),
+                  key: _avatarHeroKey,
+                  onTap: () => _openAvatarViewer(radius),
                   child: _buildMorphAvatar(cs, name, radius, pt),
                 ),
               ),
@@ -780,6 +1029,34 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                     ),
                   ),
                 ),
+              // #***! виньетка как на чужом профиле: развёрнутое фото уводим
+              // в цвет фона, чтобы не обрывалось резкой границей
+              if (hasPhoto)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  height: _headerVignette,
+                  child: IgnorePointer(
+                    child: Opacity(
+                      opacity: pt,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              spectrumSurfaceColor(cs).withValues(alpha: 0),
+                              spectrumSurfaceColor(cs).withValues(alpha: 0.55),
+                              spectrumSurfaceColor(cs),
+                            ],
+                            stops: const [0.0, 0.55, 1.0],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               Positioned(
                 left: 8,
                 right: 8,
@@ -794,7 +1071,11 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                         size: 26,
                         weight: 400,
                       ),
-                      onPressed: () {},
+                      onPressed: () => showProfileQrSheet(
+                        context,
+                        name: name,
+                        avatarUrl: _profile?.baseUrl,
+                      ),
                     ),
                     Expanded(
                       child: Opacity(
@@ -804,21 +1085,38 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
                         ),
                       ),
                     ),
-                    IconButton(
-                      icon: Icon(
-                        Symbols.edit,
-                        color: iconColor,
-                        size: 22,
-                        weight: 400,
-                      ),
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (context) => const EditProfileScreen(),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          key: _avatarMenuKey,
+                          icon: Icon(
+                            Symbols.more_vert,
+                            color: iconColor,
+                            size: 22,
+                            weight: 400,
                           ),
-                        );
-                      },
+                          onPressed: _currentAvatar == null
+                              ? null
+                              : _openAvatarMenu,
+                        ),
+                        IconButton(
+                          icon: Icon(
+                            Symbols.edit,
+                            color: iconColor,
+                            size: 22,
+                            weight: 400,
+                          ),
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => const EditProfileScreen(),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -927,7 +1225,9 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
     double radius,
     double pt,
   ) {
-    final base = _profile?.baseUrl;
+    final photos = _avatarPhotos;
+    final index = _avatarIndex.clamp(0, math.max(0, photos.length - 1)).toInt();
+    final base = photos.isEmpty ? null : photos[index].url;
     final borderOpacity = (1 - pt * 2).clamp(0.0, 1.0);
     if (base == null || base.isEmpty) {
       return Container(
@@ -954,33 +1254,82 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
         ),
       ),
     );
+    final isMain = photos[index].id == _profile?.photoId;
+    final rawUrl = _profile?.baseRawUrl;
+    final arrowOpacity = ((pt - 0.35) / 0.35).clamp(0.0, 1.0);
     return Stack(
       fit: StackFit.expand,
       children: [
         ClipRRect(
           borderRadius: BorderRadius.circular(radius),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              CachedNetworkImage(
-                imageUrl: base,
-                fit: BoxFit.cover,
-                memCacheWidth: 264,
-                memCacheHeight: 264,
-                errorWidget: (_, _, _) => letterFallback,
+          // #***! свайп по самой аватарке, без вложенного скролла:
+          // шапка морфится и ломала бы пейджеру размер вьюпорта
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onHorizontalDragEnd: photos.length > 1 ? _onAvatarSwipe : null,
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 260),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              transitionBuilder: (child, animation) {
+                final incoming = child.key == ValueKey(base);
+                final dx = (_avatarForward ? 1.0 : -1.0) * (incoming ? 1 : -1);
+                return SlideTransition(
+                  position: Tween<Offset>(
+                    begin: Offset(dx, 0),
+                    end: Offset.zero,
+                  ).animate(animation),
+                  child: FadeTransition(opacity: animation, child: child),
+                );
+              },
+              layoutBuilder: (current, previous) => Stack(
+                fit: StackFit.expand,
+                children: [...previous, ?current],
               ),
-              if (_headerEverExpanded &&
-                  _profile?.baseRawUrl != null &&
-                  _profile!.baseRawUrl!.isNotEmpty)
-                CachedNetworkImage(
-                  imageUrl: _profile!.baseRawUrl!,
-                  fit: BoxFit.cover,
-                  fadeInDuration: const Duration(milliseconds: 250),
-                  errorWidget: (_, _, _) => const SizedBox.shrink(),
-                ),
-            ],
+              child: Stack(
+                key: ValueKey(base),
+                fit: StackFit.expand,
+                children: [
+                  // #***! уменьшенный кадр показываем сразу, поверх него
+                  // догружается полноразмерный — иначе в развёрнутой шапке мыло
+                  CachedNetworkImage(
+                    imageUrl: base,
+                    fit: BoxFit.cover,
+                    memCacheWidth: _avatarThumbSize,
+                    memCacheHeight: _avatarThumbSize,
+                    placeholder: (_, _) => letterFallback,
+                    errorWidget: (_, _, _) => letterFallback,
+                  ),
+                  if (_headerEverExpanded)
+                    CachedNetworkImage(
+                      imageUrl: isMain && rawUrl != null && rawUrl.isNotEmpty
+                          ? rawUrl
+                          : base,
+                      fit: BoxFit.cover,
+                      // #***! шире экрана декодировать незачем
+                      memCacheWidth: _fullAvatarCacheWidth,
+                      fadeInDuration: const Duration(milliseconds: 250),
+                      errorWidget: (_, _, _) => const SizedBox.shrink(),
+                    ),
+                ],
+              ),
+            ),
           ),
         ),
+        if (photos.length > 1 && arrowOpacity > 0) ...[
+          if (index > 0)
+            _avatarArrow(
+              alignLeft: true,
+              opacity: arrowOpacity,
+              onTap: () => _stepAvatar(-1),
+            ),
+          if (index < photos.length - 1)
+            _avatarArrow(
+              alignLeft: false,
+              opacity: arrowOpacity,
+              onTap: () => _stepAvatar(1),
+            ),
+        ],
         if (borderOpacity > 0)
           IgnorePointer(
             child: Opacity(
@@ -1000,7 +1349,83 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
     );
   }
 
-  String _formatSelfSeen(int seconds) {
+  // #***! био показываем карточкой как на чужом профиле, тап ведёт в редактор
+  Widget _buildBioCard(ColorScheme cs, AppLocalizations l10n) {
+    final bio = _profile?.description ?? '';
+    if (bio.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: GestureDetector(
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => const EditProfileScreen()),
+        ),
+        child: GlossyPill(
+          color: cs.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(14),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+          depth: 6,
+          child: SizedBox(
+            width: double.infinity,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  l10n.editProfileBio,
+                  style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  bio,
+                  style: TextStyle(
+                    color: cs.onSurface,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _avatarArrow({
+    required bool alignLeft,
+    required double opacity,
+    required VoidCallback onTap,
+  }) {
+    return Positioned(
+      top: 0,
+      bottom: 0,
+      left: alignLeft ? 6 : null,
+      right: alignLeft ? null : 6,
+      child: Center(
+        child: Opacity(
+          opacity: opacity,
+          child: Material(
+            color: Colors.black.withValues(alpha: 0.35),
+            shape: const CircleBorder(),
+            child: InkWell(
+              customBorder: const CircleBorder(),
+              onTap: onTap,
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: Icon(
+                  alignLeft ? Symbols.chevron_left : Symbols.chevron_right,
+                  color: Colors.white,
+                  size: 24,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatSelfSeen(AppLocalizations l10n, int seconds) {
     final dt = DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
     final now = DateTime.now();
     final time = formatClock(dt);
@@ -1008,8 +1433,8 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
         dt.year == now.year && dt.month == now.month && dt.day == now.day;
     if (isToday) return time;
     final datePart = dt.year == now.year
-        ? '${dt.day} ${kRuMonthsShort[dt.month - 1]}'
-        : '${dt.day} ${kRuMonthsShort[dt.month - 1]} ${dt.year}';
+        ? formatDayMonth(l10n, dt)
+        : formatDateWords(l10n, dt);
     return '$datePart, $time';
   }
 
@@ -1025,11 +1450,14 @@ class _SettingsTabState extends State<SettingsTab> with SpectrumSurface {
             builder: (context, online, _) => ValueListenableBuilder<int?>(
               valueListenable: SelfPresence.lastSeenSeconds,
               builder: (context, seen, _) {
+                final l10n = AppLocalizations.of(context)!;
                 final label = online
-                    ? 'онлайн'
+                    ? l10n.settingsTabOnline
                     : (seen != null
-                          ? 'Был(-а) ${_formatSelfSeen(seen)}'
-                          : 'офлайн');
+                          ? l10n.settingsTabLastSeen(
+                              _formatSelfSeen(l10n, seen),
+                            )
+                          : l10n.settingsTabOffline);
                 return Row(
                   mainAxisSize: MainAxisSize.min,
                   mainAxisAlignment: MainAxisAlignment.center,

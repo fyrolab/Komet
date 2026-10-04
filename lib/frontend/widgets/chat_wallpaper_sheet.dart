@@ -1,25 +1,80 @@
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
 import 'package:komet/core/config/chat_wallpaper_themes.dart';
 import 'package:komet/core/config/app_colors.dart';
 import 'package:komet/core/storage/chat_wallpaper_store.dart';
+import 'package:komet/core/utils/image_utils.dart';
+import 'package:komet/frontend/screens/profile/custom_gradient_editor_screen.dart';
+import 'package:komet/l10n/app_localizations.dart';
 import 'chat_wallpaper_view.dart';
+import 'mesh_gradient_background.dart';
+import 'custom_notification.dart';
 import '../../core/config/app_fonts.dart';
+import '../../core/security/app_lock.dart';
 
-enum WallpaperPickType { none, theme, gallery }
+enum WallpaperPickType { none, theme, gallery, gradient }
 
 class WallpaperPick {
   final WallpaperPickType type;
   final ChatWallpaperTheme? theme;
+  final List<Color>? gradientColors;
+  final bool gradientAnimated;
+  final double gradientRotation;
 
-  const WallpaperPick.none() : type = WallpaperPickType.none, theme = null;
+  const WallpaperPick.none()
+    : type = WallpaperPickType.none,
+      theme = null,
+      gradientColors = null,
+      gradientAnimated = true,
+      gradientRotation = 0;
   const WallpaperPick.gallery()
     : type = WallpaperPickType.gallery,
-      theme = null;
-  const WallpaperPick.theme(this.theme) : type = WallpaperPickType.theme;
+      theme = null,
+      gradientColors = null,
+      gradientAnimated = true,
+      gradientRotation = 0;
+  const WallpaperPick.theme(this.theme)
+    : type = WallpaperPickType.theme,
+      gradientColors = null,
+      gradientAnimated = true,
+      gradientRotation = 0;
+  const WallpaperPick.gradient(
+    this.gradientColors, {
+    this.gradientAnimated = false,
+    this.gradientRotation = 0,
+  }) : type = WallpaperPickType.gradient,
+       theme = null;
+}
+
+// #***! путь, а не байты: withData грузит файл в java-кучу и валит процесс на OOM
+Future<Uint8List?> pickWallpaperBytes(BuildContext context) async {
+  final result = await AppLock.instance.external(
+    () => FilePicker.platform.pickFiles(type: FileType.image),
+  );
+  final path = result?.files.firstOrNull?.path;
+  if (path == null) return null;
+  if (await File(path).length() > kMaxWallpaperBytes) {
+    if (context.mounted) {
+      showCustomNotification(
+        context,
+        AppLocalizations.of(context)!.chatWallpaperSheetImageTooLarge,
+      );
+    }
+    return null;
+  }
+  final bytes = await compressWallpaperFile(path);
+  if (bytes == null && context.mounted) {
+    showCustomNotification(
+      context,
+      AppLocalizations.of(context)!.contactLocalPhotoFailed,
+    );
+  }
+  return bytes;
 }
 
 Future<WallpaperPick?> showChatWallpaperSheet(
@@ -73,6 +128,34 @@ class _ChatWallpaperGalleryScreenState
     }
   }
 
+  Future<void> _openGradientEditor() async {
+    final current = widget.current;
+    final result = await Navigator.of(context).push<CustomGradientResult>(
+      MaterialPageRoute(
+        builder: (_) => CustomGradientEditorScreen(
+          initialColors: current?.isGradient == true
+              ? current!.gradientColors
+              : null,
+          initialAnimated: current?.isGradient == true
+              ? current!.gradientAnimated
+              : false,
+          initialRotation: current?.isGradient == true
+              ? current!.gradientRotation
+              : 0,
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    Navigator.pop(
+      context,
+      WallpaperPick.gradient(
+        result.colors,
+        gradientAnimated: result.animated,
+        gradientRotation: result.rotation,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -86,7 +169,7 @@ class _ChatWallpaperGalleryScreenState
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
-          'Обои',
+          AppLocalizations.of(context)!.chatWallpaperSheetTitle,
           style: TextStyle(
             fontSize: 22,
             fontWeight: FontWeight.w700,
@@ -167,6 +250,12 @@ class _ChatWallpaperGalleryScreenState
                       _keepsImage = false;
                     }),
                   ),
+                  _CustomGradientTile(
+                    current: widget.current?.isGradient == true
+                        ? widget.current
+                        : null,
+                    onTap: _openGradientEditor,
+                  ),
                   for (final theme in kChatWallpaperThemes)
                     _ThemeTile(
                       theme: theme,
@@ -231,6 +320,7 @@ class _SampleBubbles extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     return Align(
       alignment: Alignment.bottomCenter,
       child: Padding(
@@ -241,7 +331,7 @@ class _SampleBubbles extends StatelessWidget {
           children: [
             _bubble(
               context,
-              text: 'Как насчёт новых обоев для этого чата?',
+              text: l10n.chatWallpaperSheetSampleIncoming,
               color: cs.surfaceContainerHighest.withValues(alpha: 0.94),
               textColor: cs.onSurface,
               alignment: Alignment.centerLeft,
@@ -249,7 +339,7 @@ class _SampleBubbles extends StatelessWidget {
             const SizedBox(height: 8),
             _bubble(
               context,
-              text: 'Выглядит отлично 🔥',
+              text: l10n.chatWallpaperSheetSampleOutgoing,
               color: cs.primary,
               textColor: cs.onPrimary,
               alignment: Alignment.centerRight,
@@ -386,7 +476,7 @@ class _NoneTile extends StatelessWidget {
     return _TileFrame(
       selected: selected,
       onTap: onTap,
-      label: 'Без обоев',
+      label: AppLocalizations.of(context)!.chatWallpaperSheetNone,
       child: ColoredBox(
         color: cs.surfaceContainerHighest,
         child: const Center(
@@ -415,10 +505,40 @@ class _CurrentImageTile extends StatelessWidget {
     return _TileFrame(
       selected: selected,
       onTap: onTap,
-      label: 'Ваше фото',
+      label: AppLocalizations.of(context)!.chatWallpaperSheetYourPhoto,
       child: path == null
           ? ColoredBox(color: cs.surfaceContainerHighest)
           : Image.file(File(path), fit: BoxFit.cover),
+    );
+  }
+}
+
+class _CustomGradientTile extends StatelessWidget {
+  final ChatWallpaper? current;
+  final VoidCallback onTap;
+
+  const _CustomGradientTile({required this.current, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final colors = current?.gradientColors;
+    return _TileFrame(
+      selected: false,
+      onTap: onTap,
+      label: AppLocalizations.of(context)!.themeSettingsCustomTitle,
+      child: colors != null && colors.isNotEmpty
+          ? MeshGradientBackground(
+              colors: colors,
+              animate: false,
+              rotation: current?.gradientRotation ?? 0,
+            )
+          : ColoredBox(
+              color: cs.surfaceContainerHighest,
+              child: Center(
+                child: Icon(Symbols.palette, color: cs.onSurface, size: 30),
+              ),
+            ),
     );
   }
 }
@@ -434,12 +554,28 @@ class _ThemeTile extends StatelessWidget {
     required this.onTap,
   });
 
+  String _name(AppLocalizations l10n) => switch (theme.id) {
+    'ocean' => l10n.chatWallpaperThemeOcean,
+    'sunset' => l10n.chatWallpaperThemeSunset,
+    'lavender' => l10n.chatWallpaperThemeLavender,
+    'mint' => l10n.chatWallpaperThemeMint,
+    'graphite' => l10n.chatWallpaperThemeGraphite,
+    'sky' => l10n.chatWallpaperThemeSky,
+    'peach' => l10n.chatWallpaperThemePeach,
+    'forest' => l10n.chatWallpaperThemeForest,
+    'grape' => l10n.chatWallpaperThemeGrape,
+    'night' => l10n.chatWallpaperThemeNight,
+    'rose' => l10n.chatWallpaperThemeRose,
+    'amber' => l10n.chatWallpaperThemeAmber,
+    _ => theme.id,
+  };
+
   @override
   Widget build(BuildContext context) {
     return _TileFrame(
       selected: selected,
       onTap: onTap,
-      label: theme.name,
+      label: _name(AppLocalizations.of(context)!),
       child: theme.buildPreview(),
     );
   }
@@ -467,7 +603,7 @@ class _GalleryButton extends StatelessWidget {
             Icon(Symbols.image, color: cs.onSurface, size: 22),
             const SizedBox(width: 8),
             Text(
-              'Из галереи',
+              AppLocalizations.of(context)!.chatWallpaperSheetFromGallery,
               style: TextStyle(
                 color: cs.onSurface,
                 fontSize: 16,
@@ -504,7 +640,7 @@ class _ApplyButton extends StatelessWidget {
           ),
           child: Center(
             child: Text(
-              'Применить',
+              AppLocalizations.of(context)!.spoofButtonApply,
               style: TextStyle(
                 color: cs.onPrimary,
                 fontSize: 16,

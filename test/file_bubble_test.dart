@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:komet/l10n/app_localizations.dart';
 import 'package:komet/backend/modules/messages.dart';
 import 'package:komet/core/utils/download_history.dart';
 import 'package:komet/core/utils/download_progress.dart';
@@ -47,6 +48,9 @@ Future<String> _pump(
 
   await tester.pumpWidget(
     MaterialApp(
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
+      locale: const Locale('ru'),
       home: Scaffold(
         body: Builder(
           builder: (context) {

@@ -5,12 +5,14 @@ import 'package:flutter/foundation.dart'
     show TargetPlatform, defaultTargetPlatform;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import '../config/app_camera.dart';
 import '../config/app_microphone.dart';
 import '../config/app_pulse_source.dart';
 import '../config/call_no_mute.dart';
 import '../utils/logger.dart';
 import '../utils/parse.dart';
 import 'audio_devices.dart';
+import 'camera_devices.dart';
 import 'call_admin.dart';
 import 'call_bridge.dart';
 import 'call_info.dart';
@@ -19,10 +21,13 @@ import 'pulse_audio.dart';
 import 'sfu_data_channel.dart';
 import 'ws2_signaling.dart';
 
+// #***! кто мы в звонке
 enum CallRole { caller, callee, joiner }
 
+// #***! состояние звонка от подключения до конца
 enum CallSessionState { connecting, ringing, active, ended }
 
+// #***! участник звонка, медиа роли и поднятая рука
 class CallParticipant {
   final int id;
   final bool isSelf;
@@ -51,6 +56,7 @@ class CallParticipant {
   bool get isSpeaker => roles.contains('SPEAKER');
 }
 
+// #***! сообщение в чате звонка
 class CallChatMessage {
   final String text;
   final bool mine;
@@ -59,6 +65,7 @@ class CallChatMessage {
   CallChatMessage({required this.text, required this.mine, required this.time});
 }
 
+// #***! весь звонок целиком, сигналка WebRTC участники чат и переподключения
 class CallSession {
   final Ws2Config ws2Config;
 
@@ -74,6 +81,7 @@ class CallSession {
   });
 
   Ws2Signaling? _signaling;
+  // #***! _pc это единственное соединение, в SFU оно пересоздаётся
   RTCPeerConnection? _pc;
   MediaStream? _localStream;
   MediaStream? _micStream;
@@ -83,17 +91,21 @@ class CallSession {
   String _peerType = 'USER';
   int _peerDeviceIdx = 0;
 
+  // #***! флаги своей и чужой стороны
   bool _muted = false;
   bool _speakerOn = false;
   bool _accepted = false;
   bool _peerMuted = false;
   bool _peerVideo = false;
+  bool _peerScreen = false;
   bool _mediaConnected = false;
   bool _remoteDescSet = false;
   bool _ownRemoteStream = false;
+  // #***! кандидаты пришедшие до remote SDP придерживаем тут
   final List<RTCIceCandidate> _pendingCandidates = [];
   Future<void> _tail = Future.value();
 
+  // #***! участники и их видео, экран звонка подписан
   final Map<int, CallParticipant> _participants = {};
   final Map<int, MediaStream> _participantStreams = {};
   final _participantStreamUpdates = StreamController<int>.broadcast();
@@ -107,6 +119,7 @@ class CallSession {
   bool _localScreen = false;
   MediaStream? _cameraStream;
   MediaStream? _screenStream;
+  // #***! отправители аудио камеры и экрана, треки подменяем на лету
   RTCRtpSender? _audioSender;
   RTCRtpSender? _videoSender;
   RTCRtpSender? _screenSender;
@@ -115,6 +128,7 @@ class CallSession {
   bool _monitorCapture = false;
 
   Completer<void>? _gatherDone;
+  // #***! автопереподключение, до 12 попыток с растущей задержкой
   bool _gotConnection = false;
 
   bool _reconnecting = false;
@@ -127,14 +141,17 @@ class CallSession {
   bool get isReconnecting => _reconnecting;
 
   Timer? _levelTimer;
+  // #***! говорящего ловим по уровню звука с удержанием, иначе мигает
   final Map<int, int> _speakHold = {};
 
   static const double _speakLevelOn = 0.05;
   static const int _speakHoldTicks = 3;
 
+  // #***! проба ты тоже комет, сейчас выключена
   RTCDataChannel? _probeChannel;
   bool _peerIsKomet = false;
 
+  // #***! каналы SFU, раскладка слоты и уровни
   final List<RTCDataChannel> _sfuChannels = [];
   SfuCommandChannel? _sfuCommands;
   StreamSubscription<Map<String, int>>? _sfuSlotSub;
@@ -145,6 +162,7 @@ class CallSession {
   List<String> _lastLayout = const [];
   bool _layoutSent = false;
 
+  // #***! не больше 10 видеослотов, дальше сеть не тянет
   static const int _maxVideoSlots = 10;
   static const int _sfuSpeakLevel = 50;
   static const Duration _levelTtl = Duration(seconds: 6);
@@ -159,6 +177,7 @@ class CallSession {
   static const String _probeQuestion = 'AreYouKomet?';
   static const String _probeAnswer = 'YesImKomet😎';
 
+  // #***! чат и игра идут по тому же каналу
   final List<CallChatMessage> _chat = [];
   final _chatController = StreamController<CallChatMessage>.broadcast();
   final _gameController = StreamController<Map<String, dynamic>>.broadcast();
@@ -203,6 +222,7 @@ class CallSession {
 
   final CallInfo info = CallInfo();
 
+  // #***! стримы наружу
   final _state = StreamController<CallSessionState>.broadcast();
   final _remoteStream = StreamController<MediaStream>.broadcast();
   final _info = StreamController<void>.broadcast();
@@ -223,7 +243,8 @@ class CallSession {
   String? get pulseSource => _pulseSource;
   bool get isSpeaker => _speakerOn;
   bool get peerMuted => _peerMuted;
-  bool get peerVideo => _peerVideo;
+  bool get peerVideo => _peerVideo || _peerScreen;
+  bool get peerCamera => _peerVideo;
   bool get mediaConnected => _mediaConnected;
 
   CallSessionState _current = CallSessionState.connecting;
@@ -235,6 +256,7 @@ class CallSession {
       ? 0
       : DateTime.now().difference(_activeSince!).inSeconds;
 
+  // #***! смена состояния с оповещением юишки
   void _setState(CallSessionState s) {
     if (_current == s || _current == CallSessionState.ended) return;
     if (s == CallSessionState.active) _activeSince ??= DateTime.now();
@@ -247,6 +269,7 @@ class CallSession {
     if (_topology == 'SERVER') _scheduleDisplayLayout();
   }
 
+  // #***! главный вход, поднимаем сигналку и медиа
   Future<void> start() async {
     _setState(CallSessionState.connecting);
     info.region = ws2Config.uri.host;
@@ -257,6 +280,7 @@ class CallSession {
     );
   }
 
+  // #***! подключение к ws2
   Future<void> _openSignaling() async {
     final signaling = Ws2Signaling(ws2Config);
     _signaling = signaling;
@@ -278,6 +302,7 @@ class CallSession {
     });
   }
 
+  // #***! адрес в логах маскируем, в нём токен
   String _maskedUrl() {
     final token = ws2Config.uri.queryParameters['token'];
     if (token == null || token.length < 12) return ws2Config.uri.toString();
@@ -289,6 +314,7 @@ class CallSession {
     );
   }
 
+  // #***! сигналка молчит, дёргаем командой иначе висим до таймаута
   /// Кадры ws2 приходят в broadcast-канал Rust-ядра, а подписка на него
   /// создаётся уже после того, как сокет открыт: нотификацию `connection`,
   /// присланную сразу после хэндшейка, ядро выбрасывает. Если её нет — толкаем
@@ -327,12 +353,14 @@ class CallSession {
     }
   }
 
+  // #***! обрыв сигналки
   void _onSignalingLost() {
     if (_ended || _reconnecting) return;
     logger.w('[call] signaling lost, reconnecting');
     unawaited(_reconnect());
   }
 
+  // #***! переподключение с растущей задержкой
   Future<void> _reconnect() async {
     _reconnecting = true;
     _setState(CallSessionState.connecting);
@@ -362,6 +390,7 @@ class CallSession {
     }
   }
 
+  // #***! сначала restart ICE, это дешевле полного пересоздания
   Future<void> _restartIce() async {
     if (_ended || _iceRestarting || _topology == 'SERVER') return;
     if (_iceRestarts >= _maxIceRestarts) {
@@ -384,6 +413,7 @@ class CallSession {
     }
   }
 
+  // #***! полный сброс медиа перед новой попыткой
   Future<void> _resetForReconnect() async {
     try {
       await _signaling?.close();
@@ -430,6 +460,7 @@ class CallSession {
     _localScreen = false;
   }
 
+  // #***! замер уровней звука для подсветки говорящего
   Future<void> _sampleLevels() async {
     final pc = _pc;
     if (pc == null || _ended || _topology == 'SERVER') return;
@@ -472,6 +503,7 @@ class CallSession {
     }
   }
 
+  // #***! уведомления строго по очереди
   void _enqueue(Map<String, dynamic> msg) {
     _tail = _tail.then((_) => _onNotification(msg)).catchError((
       Object e,
@@ -481,6 +513,7 @@ class CallSession {
     });
   }
 
+  // #***! роутер уведомлений сигналки
   Future<void> _onNotification(Map<String, dynamic> msg) async {
     final name = msg['notification'] ?? msg['response'] ?? msg['type'];
     logger.i('[call] ws2 <- $name');
@@ -547,6 +580,7 @@ class CallSession {
     }
   }
 
+  // #***! сервер вернул ошибку
   void _onWs2Error(Map<String, dynamic> msg) {
     final err = msg['error'];
     logger.w('[call] ws2 error: $err raw=$msg');
@@ -570,6 +604,7 @@ class CallSession {
     return null;
   }
 
+  // #***! админ требует включить микрофон или камеру
   void _onForcedMedia(Map<String, dynamic> msg) {
     bool? audioOn;
     final ms = msg['mediaSettings'];
@@ -587,6 +622,7 @@ class CallSession {
     _applyMuted(!audioOn);
   }
 
+  // #***! нас или другого замьютили
   void _onMuteParticipant(Map<String, dynamic> msg) {
     final muteStates = msg['muteStates'];
     if (muteStates is! Map || muteStates['AUDIO'] is! String) return;
@@ -606,6 +642,7 @@ class CallSession {
     }
   }
 
+  // #***! звонок завершили с той стороны
   void _onHungup(Map<String, dynamic> msg) {
     final raw =
         msg['participantId'] ??
@@ -624,6 +661,7 @@ class CallSession {
     );
   }
 
+  // #***! разбор состава участников
   void _resolveParticipants(Object? conversation) {
     if (conversation is! Map) return;
     final list = conversation['participants'];
@@ -693,6 +731,7 @@ class CallSession {
     return state['hand'] == '1' || state['hand'] == true;
   }
 
+  // #***! участник включил или выключил медиа
   void _onParticipantMedia(Map<String, dynamic> msg) {
     final id = _participantIdFrom(msg['participantId']);
     if (id == null) return;
@@ -710,6 +749,7 @@ class CallSession {
     _notifyInfo();
   }
 
+  // #***! кто то вошёл
   void _onParticipantJoined(Map<String, dynamic> msg) {
     final nested = msg['participant'];
     final p = nested is Map ? nested : msg;
@@ -730,6 +770,7 @@ class CallSession {
     _notifyInfo();
   }
 
+  // #***! в звонке один на один второй это собеседник, запоминаем
   void _maybeAdoptPeer(int id, Map<dynamic, dynamic> source) {
     if (role != CallRole.joiner || _peerId != null || _pc == null) return;
     if (_topology == 'SERVER') return;
@@ -743,6 +784,7 @@ class CallSession {
     unawaited(_createAndSendOffer());
   }
 
+  // #***! сменились роли
   void _onRolesChanged(Map<String, dynamic> msg) {
     final id = _participantIdFrom(msg['participantId']);
     if (id == null) return;
@@ -776,12 +818,14 @@ class CallSession {
     _notifyInfo();
   }
 
+  // #***! участник вышел
   void _onParticipantLeft(Map<String, dynamic> msg) {
     final id = msg['participantId'];
     if (id is! int) return;
     if (_participants.remove(id) != null) _notifyInfo();
   }
 
+  // #***! параметры медиа от сервера, отсюда начинается WebRTC
   Future<void> _onConnection(Map<String, dynamic> msg) async {
     _gotConnection = true;
     logger.i('[call] connection notification received');
@@ -827,6 +871,7 @@ class CallSession {
     await accept(activate: role != CallRole.caller);
   }
 
+  // #***! создание RTCPeerConnection с ICE серверами
   Future<RTCPeerConnection> _createPc(List ice) async {
     final pc = await createPeerConnection({
       'iceServers': ice,
@@ -891,6 +936,7 @@ class CallSession {
     return pc;
   }
 
+  // #***! свои дорожки, микрофон всегда видео по требованию
   Future<void> _addLocalMedia(RTCPeerConnection pc) async {
     await _prepareAudioSession();
     await _disposeMicStream();
@@ -918,6 +964,7 @@ class CallSession {
     await applyAudioRoute();
   }
 
+  // #***! на мобилках микрофон выбирает движок
   Future<void> _selectMicInsideEngine() async {
     final deviceId = _micDeviceId;
     if (deviceId == null || !AudioDevices.switchesInsideEngine) return;
@@ -941,6 +988,7 @@ class CallSession {
     }
   }
 
+  // #***! на линуксе источник через PulseAudio а не через WebRTC
   Future<void> setPulseSource(String? sourceName) async {
     final previous = _pulseSource;
     final next = (sourceName == null || sourceName.isEmpty) ? null : sourceName;
@@ -997,6 +1045,7 @@ class CallSession {
     _micDeviceId = device;
   }
 
+  // #***! смена микрофона на ходу, подменяем дорожку в идущем звонке
   Future<void> setMicrophone(String? deviceId) async {
     final next = (deviceId == null || deviceId.isEmpty) ? null : deviceId;
     _micDeviceId = next;
@@ -1046,6 +1095,7 @@ class CallSession {
     }
   }
 
+  // #***! громкая связь
   Future<void> setSpeaker(bool on) async {
     if (_speakerOn == on) return;
     _speakerOn = on;
@@ -1067,6 +1117,7 @@ class CallSession {
     await applyAudioRoute();
   }
 
+  // #***! маршрут звука, динамик наушники гарнитура
   Future<void> applyAudioRoute() async {
     if (!_canRouteAudio) return;
     try {
@@ -1080,6 +1131,7 @@ class CallSession {
       defaultTargetPlatform == TargetPlatform.android ||
       defaultTargetPlatform == TargetPlatform.iOS;
 
+  // #***! служебные каналы SFU
   Future<void> _openSfuChannels(RTCPeerConnection pc) async {
     await _closeSfuChannels();
     final commands = SfuCommandChannel();
@@ -1108,6 +1160,7 @@ class CallSession {
     }
   }
 
+  // #***! уровни звука от SFU, по ним подсвечиваем говорящего
   void _onSfuLevels(Map<String, int> levels) {
     final now = DateTime.now();
     levels.forEach((key, level) {
@@ -1126,6 +1179,7 @@ class CallSession {
     _notifyInfo();
   }
 
+  // #***! слот -> участник, сервер шлёт видео слотами а не по id
   void _onSfuSlots(Map<String, int> slots) {
     if (slots.isEmpty) return;
     _slotParticipant.clear();
@@ -1151,6 +1205,7 @@ class CallSession {
     );
   }
 
+  // #***! говорим серверу чьи видео и в каком размере нужны
   Future<void> _publishDisplayLayout({bool force = false}) async {
     final commands = _sfuCommands;
     if (commands == null || _topology != 'SERVER' || _ended) return;
@@ -1204,6 +1259,7 @@ class CallSession {
     return mids;
   }
 
+  // #***! перед чужим видео надо завести под него слот в SDP
   Future<void> _prepareVideoSlot(RTCPeerConnection pc, String offerSdp) async {
     final mids = _videoSlotMids(offerSdp);
     if (mids.isEmpty) return;
@@ -1252,6 +1308,7 @@ class CallSession {
     }
   }
 
+  // #***! свой ли клиент на той стороне, от этого чат и игры
   Future<void> _setupKometProbe(RTCPeerConnection pc) async {
     if (!_kometProbeEnabled || _topology == 'SERVER') return;
     try {
@@ -1315,6 +1372,7 @@ class CallSession {
     } catch (_) {}
   }
 
+  // #***! чат звонка идёт по каналу мимо сервера сообщений
   void sendChatMessage(String text) {
     final body = text.trim();
     final channel = _probeChannel;
@@ -1329,6 +1387,7 @@ class CallSession {
     _addChat(CallChatMessage(text: body, mine: true, time: DateTime.now()));
   }
 
+  // #***! шашки шлют ходы тем же каналом
   void sendGame(Map<String, dynamic> data) {
     final channel = _probeChannel;
     if (channel == null) return;
@@ -1350,6 +1409,7 @@ class CallSession {
     _notifyInfo();
   }
 
+  // #***! переход в SFU, пересобираем соединение под сервер микшер
   Future<void> _setupSfu() async {
     if (_pc != null) {
       await _closeSfuChannels();
@@ -1415,6 +1475,7 @@ class CallSession {
     await _openSfuChannels(pc);
   }
 
+  // #***! после пересборки видео надо опубликовать заново
   Future<void> _republishVideo(RTCPeerConnection pc) async {
     final camera = _cameraStream;
     if (camera != null) {
@@ -1432,6 +1493,7 @@ class CallSession {
     }
   }
 
+  // #***! сервер сменил топологию
   Future<void> _onTopologyChanged(Map<String, dynamic> msg) async {
     final topo = msg['topology']?.toString();
     if (topo == null) return;
@@ -1443,6 +1505,7 @@ class CallSession {
     if (switchingToSfu) await _setupSfu();
   }
 
+  // #***! сервер сказал про новый чужой поток
   Future<void> _onProducerUpdated(Map<String, dynamic> msg) async {
     logger.i(
       '[call][sfu] producer-updated fields=${msg.keys.toList()} '
@@ -1554,6 +1617,7 @@ class CallSession {
     unawaited(_publishDisplayLayout(force: true));
   }
 
+  // #***! дальше разбор SDP ради отладочной сводки
   int _countCandidates(String sdp) =>
       RegExp(r'^a=candidate:', multiLine: true).allMatches(sdp).length;
 
@@ -1826,6 +1890,7 @@ class CallSession {
     return mline == null ? 'НЕТ m=video' : '$mline -> $dir';
   }
 
+  // #***! пришла чужая дорожка
   Future<void> _onRemoteTrack(RTCTrackEvent event) async {
     logger.t(
       '[call] remote track: ${event.track.kind} id=${event.track.id} '
@@ -1855,6 +1920,7 @@ class CallSession {
     return null;
   }
 
+  // #***! привязываем дорожку к участнику по слоту
   Future<void> _bindParticipantTrack(MediaStreamTrack track) async {
     final id = _participantFromTrackId(track.id);
     if (id == null || id == ws2Config.userId) return;
@@ -1923,6 +1989,7 @@ class CallSession {
     } catch (_) {}
   }
 
+  // #***! создание и отправка offer
   Future<void> _createAndSendOffer({bool iceRestart = false}) async {
     final pc = _pc;
     final peerId = _peerId;
@@ -1946,6 +2013,7 @@ class CallSession {
       defaultTargetPlatform == TargetPlatform.windows ||
       defaultTargetPlatform == TargetPlatform.macOS;
 
+  // #***! на десктопе форсим VP8, аппаратный H.264 там часто битый
   Future<void> _preferVp8Codecs(RTCPeerConnection pc) async {
     try {
       final caps = await getRtpSenderCapabilities('video');
@@ -1967,6 +2035,7 @@ class CallSession {
     }
   }
 
+  // #***! пришёл SDP или кандидат от собеседника
   Future<void> _onTransmittedData(Map<String, dynamic> msg) async {
     final pc = _pc;
     if (pc == null) return;
@@ -2041,6 +2110,7 @@ class CallSession {
     }
   }
 
+  // #***! придержанные кандидаты отправляем в соединение
   Future<void> _flushCandidates() async {
     final pc = _pc;
     if (pc == null || _pendingCandidates.isEmpty) return;
@@ -2053,6 +2123,7 @@ class CallSession {
     }
   }
 
+  // #***! ждём сбора кандидатов но не бесконечно
   Future<void> _awaitIceGathering(
     RTCPeerConnection pc, {
     Duration timeout = const Duration(seconds: 5),
@@ -2073,6 +2144,7 @@ class CallSession {
     }
   }
 
+  // #***! свой кандидат уходит собеседнику
   void _onLocalCandidate(RTCIceCandidate candidate) {
     final line = candidate.candidate;
     if (line != null && line.contains(' typ relay')) {
@@ -2092,6 +2164,7 @@ class CallSession {
     );
   }
 
+  // #***! принятие входящего
   Future<void> accept({bool activate = true}) async {
     if (_accepted) return;
     _accepted = true;
@@ -2104,10 +2177,12 @@ class CallSession {
     if (activate) _setState(CallSessionState.active);
   }
 
+  // #***! говорим собеседнику про свой микрофон
   Future<void> sendAudioEnabledSignal(bool enabled) async {
     await _signaling?.changeMediaSettings(isAudioEnabled: enabled);
   }
 
+  // #***! мьют, дорожку не убираем а глушим иначе собеседник увидит разрыв
   Future<void> setMuted(bool muted) async {
     await _applyMuted(muted, announce: true);
   }
@@ -2127,11 +2202,13 @@ class CallSession {
     );
   }
 
+  // #***! камера и демонстрация экрана
   Future<void> setVideoEnabled(bool on) => on ? _startCamera() : _stopCamera();
 
   Future<void> setScreenSharing(bool on) =>
       on ? _startScreenShare() : _stopScreenShare();
 
+  // #***! ручной переход на серверную топологию
   Future<void> switchToServerTopology({bool force = false}) async {
     if (_topology == 'SERVER') return;
     try {
@@ -2141,12 +2218,13 @@ class CallSession {
     }
   }
 
+  // #***! включение камеры
   Future<void> _startCamera() async {
     final pc = _pc;
     if (pc == null) return;
 
     final stream = await navigator.mediaDevices.getUserMedia(<String, dynamic>{
-      'video': true,
+      'video': CameraDevices.constraints(AppCamera.deviceId),
       'audio': false,
     });
 
@@ -2180,6 +2258,7 @@ class CallSession {
     _notifyInfo();
   }
 
+  // #***! демонстрация экрана, на мобилках нужно своё разрешение
   Future<void> _startScreenShare() async {
     if (_pc == null) return;
 
@@ -2257,6 +2336,7 @@ class CallSession {
     _notifyInfo();
   }
 
+  // #***! пересогласование после смены дорожек
   Future<void> _renegotiate() async {
     if (_topology == 'SERVER') return;
     try {
@@ -2293,6 +2373,7 @@ class CallSession {
     } catch (_) {}
   }
 
+  // #***! завершение звонка
   Future<void> hangup({String? reason}) async {
     final r = reason ?? _autoHangupReason();
     try {
@@ -2301,6 +2382,7 @@ class CallSession {
     _end();
   }
 
+  // #***! причину подбираем по тому на каком этапе прервались
   String _autoHangupReason() {
     if (_current != CallSessionState.active) {
       if (role == CallRole.caller) return 'CANCELED';
@@ -2317,6 +2399,7 @@ class CallSession {
     _dispose();
   }
 
+  // #***! освобождаем всё, соединение дорожки подписки стримы
   Future<void> _dispose() async {
     _levelTimer?.cancel();
     _videoStatsTimer?.cancel();
@@ -2354,6 +2437,7 @@ class CallSession {
     if (!_gameController.isClosed) await _gameController.close();
   }
 
+  // #***! параметры соединения в отладочную сводку
   void _applyConnectionInfo(Map<String, dynamic> msg, List iceServers) {
     final conv = msg['conversation'];
     if (conv is Map) {
@@ -2369,6 +2453,7 @@ class CallSession {
             if (ms is Map) {
               _peerMuted = ms['isAudioEnabled'] != true;
               _peerVideo = ms['isVideoEnabled'] == true;
+              _peerScreen = ms['isScreenSharingEnabled'] == true;
             }
           }
         }
@@ -2403,11 +2488,13 @@ class CallSession {
 
     final muted = ms['isAudioEnabled'] != true;
     final video = ms['isVideoEnabled'] == true;
-    if (muted != _peerMuted || video != _peerVideo) {
+    final screen = ms['isScreenSharingEnabled'] == true;
+    if (muted != _peerMuted || video != _peerVideo || screen != _peerScreen) {
       _peerMuted = muted;
       _peerVideo = video;
+      _peerScreen = screen;
       _notifyInfo();
-      if (video) unawaited(_collectReceivers());
+      if (video || screen) unawaited(_collectReceivers());
     }
   }
 
@@ -2442,6 +2529,7 @@ class CallSession {
     }
   }
 
+  // #***! напрямую идём или через TURN
   Future<void> _resolvePath() async {
     final pc = _pc;
     if (pc == null) return;
@@ -2471,6 +2559,7 @@ class CallSession {
     } catch (_) {}
   }
 
+  // #***! вычисляем собеседника в звонке один на один
   void _resolvePeer(Object? conversation) {
     if (conversation is! Map) return;
     final participants = conversation['participants'];
@@ -2494,6 +2583,7 @@ class CallSession {
     }
   }
 
+  // #***! ICE серверы в формате WebRTC
   List<Map<String, dynamic>>? _iceServersFrom(Object? convParams) {
     if (convParams is! Map) return null;
     final servers = <Map<String, dynamic>>[];

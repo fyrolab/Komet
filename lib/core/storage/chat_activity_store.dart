@@ -1,27 +1,23 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
+// #***! что делает собеседник, печатает или выбирает стикер
 enum ChatActivity { typing, sticker }
 
-extension ChatActivityLabel on ChatActivity {
-  String get label => switch (this) {
-    ChatActivity.typing => 'Печатает...',
-    ChatActivity.sticker => 'Выбирает стикер...',
-  };
-}
-
+// #***! тип строкой, всё кроме STICKER считаем печатью
 ChatActivity chatActivityFromType(dynamic type) =>
     type == 'STICKER' ? ChatActivity.sticker : ChatActivity.typing;
 
+// #***! что происходит и кто этим занят
 class ChatActivitySnapshot {
   const ChatActivitySnapshot({required this.activity, required this.userIds});
 
   final ChatActivity activity;
   final List<int> userIds;
 
-  String get label => activity.label;
-
+  // #***! сравниваем по значению иначе шапка перерисовывается на каждый пуш
   @override
   bool operator ==(Object other) =>
       other is ChatActivitySnapshot &&
@@ -32,13 +28,23 @@ class ChatActivitySnapshot {
   int get hashCode => Object.hash(activity, Object.hashAll(userIds));
 }
 
+// #***! печатает в памяти, само истекает
 class ChatActivityStore {
-  ChatActivityStore._();
+  ChatActivityStore._({int Function()? now}) : _now = now ?? _wallClock;
+
+  @visibleForTesting
+  ChatActivityStore.withClock(int Function() now) : this._(now: now);
 
   static final ChatActivityStore instance = ChatActivityStore._();
 
+  // #***! сервер не шлёт перестал печатать, снимаем сами через 6 сек
   static const Duration _ttl = Duration(seconds: 6);
+  static const Duration maxTypingTime = Duration(minutes: 15);
 
+  static int _wallClock() => DateTime.now().millisecondsSinceEpoch;
+
+  final int Function() _now;
+  final Map<int, Map<int, int>> _typingSince = {};
   final Map<int, Map<int, ChatActivity>> _users = {};
   final Map<int, Map<int, Timer>> _timers = {};
   final Map<int, ValueNotifier<ChatActivitySnapshot?>> _notifiers = {};
@@ -53,12 +59,35 @@ class ChatActivityStore {
 
   ChatActivity? activity(int chatId) => _current(chatId)?.activity;
 
+  // #***! новый пуш продлевает таймер
   void mark(int chatId, int userId, ChatActivity activity) {
     final timers = _timers.putIfAbsent(chatId, () => <int, Timer>{});
     timers[userId]?.cancel();
     timers[userId] = Timer(_ttl, () => _remove(chatId, userId));
     _users.putIfAbsent(chatId, () => <int, ChatActivity>{})[userId] = activity;
+    if (activity == ChatActivity.typing) {
+      _typingSince
+          .putIfAbsent(chatId, () => <int, int>{})
+          .putIfAbsent(userId, _now);
+    } else {
+      _forgetTypingStart(chatId, userId);
+    }
     _sync(chatId);
+  }
+
+  int? takeTypingTime(int chatId, int userId) {
+    final since = _forgetTypingStart(chatId, userId);
+    if (since == null) return null;
+    final elapsed = _now() - since;
+    if (elapsed > maxTypingTime.inMilliseconds) return null;
+    return math.max(0, elapsed);
+  }
+
+  int? _forgetTypingStart(int chatId, int userId) {
+    final starts = _typingSince[chatId];
+    final since = starts?.remove(userId);
+    if (starts != null && starts.isEmpty) _typingSince.remove(chatId);
+    return since;
   }
 
   void clearUser(int chatId, int userId) => _remove(chatId, userId);
@@ -71,11 +100,13 @@ class ChatActivityStore {
       }
     }
     _users.remove(chatId);
+    _typingSince.remove(chatId);
     _sync(chatId);
   }
 
   void _remove(int chatId, int userId) {
     _timers[chatId]?.remove(userId)?.cancel();
+    _forgetTypingStart(chatId, userId);
     final users = _users[chatId];
     if (users != null) {
       users.remove(userId);
@@ -84,6 +115,7 @@ class ChatActivityStore {
     _sync(chatId);
   }
 
+  // #***! кто то печатает, показываем печать она важнее стикера
   ChatActivitySnapshot? _current(int chatId) {
     final users = _users[chatId];
     if (users == null || users.isEmpty) return null;

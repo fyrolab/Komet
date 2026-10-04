@@ -1,0 +1,696 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+
+import '../../../../backend/api.dart';
+import '../../../../backend/modules/chats.dart';
+import '../../../../backend/modules/comments.dart';
+import '../../../../backend/modules/message_copy.dart';
+import '../../../../backend/modules/messages.dart';
+import '../../../../core/config/app_commands.dart';
+import '../../../../core/crypto/message_decryption_cache.dart';
+import '../../../../core/plugins/plugin_outgoing_text.dart';
+import '../../../../core/storage/app_database.dart';
+import '../../../../core/cache/message_session_cache.dart';
+import '../../../../core/storage/draft_store.dart';
+import '../../../../core/crypto/e2ee_service.dart';
+import '../../../../core/storage/chat_encryption_store.dart';
+import '../../../../core/utils/haptics.dart';
+import '../../../../core/utils/logger.dart';
+import '../../../../l10n/app_localizations.dart';
+import '../../../../main.dart';
+import '../../../commands/commands.dart';
+import '../../../widgets/rich_message_controller.dart';
+import 'chat_controller.dart';
+import '../../../../backend/modules/forward_sender.dart';
+
+// #***! текстовые сообщения + пересылка + reply-состояние; медиа-отправка
+// живёт отдельно в ChatMediaSendController — здесь то, что завязано на
+// reply/draft/slash-команды/подтверждение отправки
+class ChatTextSendController {
+  final Api _api;
+  final MessagesModule _messages;
+  final CommentsModule _comments;
+  // #***! сквозное шифрование живёт рядом: открытый текст запечатывается локально
+  final ChatController chatController;
+  final RichMessageController messageController;
+  final ValueNotifier<bool> hasText;
+  final ValueNotifier<CachedMessage?> replyTo;
+  final ValueNotifier<ForwardRequest?> pendingForward;
+  final bool commentsMode;
+  final String? commentPostId;
+  final VoidCallback bumpMessages;
+  final VoidCallback scrollToBottom;
+  final VoidCallback focusComposer;
+  final void Function(String?) setLastSentId;
+  final void Function(String) notify;
+  final bool Function() isMounted;
+  final AppLocalizations Function() l10nOf;
+  final CachedChat? Function() chatOf;
+  final Future<String?> Function(String text, {bool notify}) encryptOutgoing;
+  final Future<void> Function(SlashCommand command, String args) executeCommand;
+  final void Function(CachedMessage) checkPrankTrigger;
+  final Future<bool> Function() confirmSend;
+
+  ChatTextSendController({
+    Api? apiClient,
+    MessagesModule? messageSender,
+    CommentsModule? commentSender,
+    required this.chatController,
+    required this.messageController,
+    required this.hasText,
+    required this.replyTo,
+    required this.pendingForward,
+    required this.commentsMode,
+    required this.commentPostId,
+    required this.bumpMessages,
+    required this.scrollToBottom,
+    required this.focusComposer,
+    required this.setLastSentId,
+    required this.notify,
+    required this.isMounted,
+    required this.l10nOf,
+    required this.chatOf,
+    required this.encryptOutgoing,
+    required this.executeCommand,
+    required this.checkPrankTrigger,
+    required this.confirmSend,
+  }) : _api = apiClient ?? api,
+       _messages = messageSender ?? messagesModule,
+       _comments = commentSender ?? commentsModule;
+
+  int get _myId => chatController.myId;
+  int get _chatId => chatController.chatId;
+
+  bool get _e2eeActive => E2eeService.instance.isActive(_myId, _chatId);
+
+  bool get _encrypted =>
+      _e2eeActive || ChatEncryptionStore.instance.isEnabled(_myId, _chatId);
+
+  Future<Uint8List?> _seal(int accountId, int chatId, String plaintext) =>
+      E2eeService.instance.isActive(accountId, chatId)
+      ? E2eeService.instance.sealText(accountId, chatId, plaintext)
+      : Future.value(null);
+
+  static const int _maxClockSkewMs = 24 * 60 * 60 * 1000;
+
+  static int _serverTimeOf(String messageId, {required int fallback}) {
+    final id = int.tryParse(messageId);
+    if (id == null || id <= 0) return fallback;
+    final time = messageIdToTime(id);
+    return (time - fallback).abs() < _maxClockSkewMs ? time : fallback;
+  }
+
+  // #***! доступен _pickReplyChat (остаётся в chat_screen.dart, навигация)
+  int? replySourceChatId;
+  bool _forwardSending = false;
+
+  void startReply(CachedMessage message) {
+    cancelForward();
+    replyTo.value = message;
+    replySourceChatId = null;
+    focusComposer();
+  }
+
+  void cancelReply() {
+    replyTo.value = null;
+    replySourceChatId = null;
+  }
+
+  void setForwardRequest(ForwardRequest request) {
+    cancelReply();
+    pendingForward.value = request;
+  }
+
+  void cancelForward() {
+    pendingForward.value = null;
+  }
+
+  void toggleForwardSender() {
+    final request = pendingForward.value;
+    if (request == null || _forwardSending) return;
+    if (!request.hideSender && !request.canHideSender) {
+      Haptics.error();
+      notify(l10nOf().forwardHideSenderUnavailable);
+      return;
+    }
+    Haptics.selection();
+    pendingForward.value = request.withHideSender(!request.hideSender);
+  }
+
+  Future<void> _syncForwardOutgoing(
+    CachedMessage message, {
+    String? removeId,
+  }) async {
+    try {
+      if (removeId != null && removeId != message.id) {
+        await AppDatabase.deleteMessage(
+          message.accountId,
+          message.chatId,
+          removeId,
+        );
+      }
+      await AppDatabase.saveMessages([message.toDbRow()]);
+    } catch (e) {
+      logger.w('Пересылаемое ${message.id} не сохранилось: $e');
+    }
+    try {
+      await ForwardSender.recordInChatList(message);
+    } catch (e) {
+      logger.w('Пересылаемое ${message.id} не попало в список чатов: $e');
+    }
+  }
+
+  Future<bool> sendForwardRequest() async {
+    var request = pendingForward.value;
+    if (request == null) return true;
+    // #***! пересылка это серверная копия, текст подставляет сервер а не мы
+    if (_encrypted) {
+      cancelForward();
+      notify(l10nOf().e2eeForwardBlocked);
+      return false;
+    }
+    if (_api.state != SessionState.online) {
+      notify(l10nOf().forwardOffline);
+      return false;
+    }
+    final accountId = _myId;
+    final chatId = _chatId;
+    final epoch = _messages.sessionEpoch;
+    Haptics.send();
+    while (request != null && request.messages.isNotEmpty) {
+      if (!identical(pendingForward.value, request)) return false;
+      if (_myId != accountId ||
+          _chatId != chatId ||
+          _messages.sessionEpoch != epoch) {
+        return false;
+      }
+      final source = request.messages.first;
+      final sent = request.hideSender
+          ? await _sendOneCopy(source, accountId, chatId, epoch)
+          : await _sendOneForward(source, request, accountId, chatId, epoch);
+      if (!sent || !isMounted()) return false;
+      if (!identical(pendingForward.value, request)) return false;
+      final remaining = request.messages.skip(1).toList(growable: false);
+      if (remaining.isEmpty) break;
+      request = request.withMessages(remaining);
+      pendingForward.value = request;
+    }
+    cancelForward();
+    return true;
+  }
+
+  Future<bool> _sendOneForward(
+    CachedMessage source,
+    ForwardRequest request,
+    int accountId,
+    int chatId,
+    int epoch,
+  ) {
+    final optimistic = request.optimisticForward(
+      source,
+      myId: accountId,
+      targetChatId: chatId,
+      tempId: chatController.nextTempId(),
+      status: 'sending',
+    );
+    return _deliverForwarded(
+      optimistic,
+      () => ForwardSender.sendForward(
+        optimistic.accountId,
+        optimistic.chatId,
+        request,
+        source,
+        optimistic: optimistic,
+        sender: _messages,
+        expectedSessionEpoch: epoch,
+      ),
+    );
+  }
+
+  Future<bool> _sendOneCopy(
+    CachedMessage source,
+    int accountId,
+    int chatId,
+    int epoch,
+  ) async {
+    final copy = MessageCopy.of(source);
+    if (copy == null) return false;
+    final optimistic = copy.toOutgoing(
+      accountId: accountId,
+      chatId: chatId,
+      tempId: chatController.nextTempId(),
+      time: DateTime.now().millisecondsSinceEpoch,
+    );
+    return _deliverForwarded(
+      optimistic,
+      () => ForwardSender.sendCopy(
+        optimistic.accountId,
+        optimistic.chatId,
+        source,
+        sender: _messages,
+        expectedSessionEpoch: epoch,
+      ),
+    );
+  }
+
+  Future<bool> _deliverForwarded(
+    CachedMessage optimistic,
+    Future<CachedMessage> Function() send,
+  ) async {
+    bool canUpdateChat() =>
+        isMounted() &&
+        _myId == optimistic.accountId &&
+        _chatId == optimistic.chatId;
+    chatController.addMessage(optimistic);
+    bumpMessages();
+    scrollToBottom();
+    await _syncForwardOutgoing(optimistic);
+    try {
+      final sent = await send();
+      if (canUpdateChat()) {
+        final index = chatController.indexOfId(optimistic.id);
+        if (index != -1) {
+          chatController.setMessageAt(index, sent);
+          bumpMessages();
+        }
+      }
+      await _syncForwardOutgoing(sent, removeId: optimistic.id);
+      return true;
+    } catch (_) {
+      final index = chatController.indexOfId(optimistic.id);
+      if (index != -1 && canUpdateChat()) {
+        chatController.removeMessageAt(index);
+        bumpMessages();
+      }
+      try {
+        await AppDatabase.deleteMessage(
+          optimistic.accountId,
+          optimistic.chatId,
+          optimistic.id,
+        );
+        await chats.reconcileLastMessage(
+          optimistic.accountId,
+          optimistic.chatId,
+        );
+      } catch (e) {
+        logger.w('Несостоявшаяся пересылка ${optimistic.id} не убрана: $e');
+      }
+      if (canUpdateChat()) {
+        Haptics.error();
+        notify(l10nOf().forwardFailed);
+      }
+      return false;
+    }
+  }
+
+  Future<void> sendMessage() async {
+    if (pendingForward.value == null) {
+      await sendTextMessage();
+      return;
+    }
+    if (_forwardSending || _myId == 0) return;
+    _forwardSending = true;
+    try {
+      if (!await confirmSend() || !isMounted()) return;
+      final forwarded = await sendForwardRequest();
+      if (!forwarded || !isMounted()) return;
+      if (messageController.text.trim().isEmpty) return;
+      await sendTextMessage(confirmed: true);
+    } finally {
+      _forwardSending = false;
+    }
+  }
+
+  Future<void> sendTextMessage({bool confirmed = false}) async {
+    final content = messageController.buildContent();
+    final rawText = content.text;
+    final text = rawText.trim();
+    final accountId = _myId;
+    final chatId = _chatId;
+    final epoch = _messages.sessionEpoch;
+    if (text.isEmpty || accountId == 0) return;
+
+    bool canUpdateChat() =>
+        isMounted() && _myId == accountId && _chatId == chatId;
+
+    if (AppCommands.current.value && text.startsWith('/')) {
+      final command = CommandRegistry.instance.find(text);
+      if (command == null) {
+        messageController.clear();
+        hasText.value = false;
+        notify(l10nOf().chatTextSendUnknownCommand);
+        return;
+      }
+      final args = commandArgs(text);
+      messageController.clear();
+      hasText.value = false;
+      unawaited(executeCommand(command, args));
+      return;
+    }
+
+    if (!confirmed && (!await confirmSend() || !canUpdateChat())) return;
+
+    final wireText = await encryptOutgoing(text);
+    if (wireText == null || !canUpdateChat()) return;
+    final encrypted = wireText != text;
+    final sealedText = encrypted ? await _seal(accountId, chatId, text) : null;
+    final e2eeFlag = sealedText == null
+        ? CachedMessage.e2eeNone
+        : CachedMessage.e2eeText;
+    if (!canUpdateChat()) return;
+
+    final tempId = chatController.nextTempId();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final online = _api.state == SessionState.online;
+
+    final reply = replyTo.value;
+    final int? replyId = reply == null ? null : int.tryParse(reply.id);
+    final int? replySrcChatId = replyId == null ? null : replySourceChatId;
+    Map<String, dynamic>? replyPayload;
+    if (reply != null && replyId != null) {
+      final sourceLink = reply.payload?['link'];
+      replyPayload = {
+        'link': {
+          'type': 'REPLY',
+          'chatId': replySrcChatId ?? chatId,
+          'message': {
+            'id': replyId,
+            'sender': reply.senderId,
+            'text': reply.text,
+            'time': reply.time,
+            'attaches': reply.payload?['attaches'] ?? const [],
+            if (sourceLink is Map && sourceLink['type'] == 'FORWARD')
+              'link': sourceLink,
+          },
+        },
+      };
+    }
+    replyTo.value = null;
+    replySourceChatId = null;
+
+    final elements = encrypted
+        ? const <Map<String, dynamic>>[]
+        : trimmedElements(content.elements, rawText, text);
+    final Map<String, dynamic>? composedPayload =
+        (replyPayload == null && elements.isEmpty)
+        ? null
+        : {...?replyPayload, if (elements.isNotEmpty) 'elements': elements};
+
+    final composed = CachedMessage(
+      id: tempId,
+      accountId: accountId,
+      chatId: chatId,
+      senderId: accountId,
+      text: wireText,
+      time: now,
+      status: online ? 'sending' : 'pending',
+      payload: composedPayload,
+      sealedText: sealedText,
+      e2ee: e2eeFlag,
+    );
+    if (encrypted) MessageDecryptionCache.instance.seed(tempId, text);
+
+    hasText.value = false;
+    setLastSentId(tempId);
+    chatController.addMessage(composed);
+    messageController.clear();
+    if (!commentsMode && DraftStore.instance.get(accountId, chatId) != null) {
+      unawaited(DraftStore.instance.clear(accountId, chatId));
+    }
+    bumpMessages();
+
+    // Instant tactile "whoosh" the moment the message leaves the composer,
+    // not after the network round-trip — feedback must feel immediate.
+    Haptics.send();
+
+    scrollToBottom();
+    checkPrankTrigger(composed);
+
+    var persisted = commentsMode;
+    try {
+      if (!commentsMode) {
+        await AppDatabase.saveMessages([composed.toDbRow()]);
+        persisted = true;
+        await chats.applyOutgoing(
+          accountId,
+          chatId,
+          messageId: tempId,
+          time: now,
+          text: wireText,
+          status: composed.status!,
+          elements: elements,
+        );
+      }
+      if (!online) return;
+      if (!commentsMode) {
+        final stored = await AppDatabase.loadMessage(accountId, chatId, tempId);
+        if (stored == null ||
+            stored['status'] != 'sending' ||
+            stored['deleted'] != 0) {
+          await chats.reconcileLastMessage(accountId, chatId);
+          return;
+        }
+      }
+      void checkSession() {
+        if (_messages.sessionEpoch != epoch) {
+          throw StateError('Сессия изменилась до отправки');
+        }
+      }
+
+      checkSession();
+      final actualId = commentsMode
+          ? await _comments.sendComment(
+              accountId,
+              chatId,
+              commentPostId!,
+              wireText,
+              replyToMessageId: replyId,
+              elements: elements,
+            )
+          : await _messages.sendMessage(
+              accountId,
+              chatId,
+              wireText,
+              replyToMessageId: replyId,
+              replySourceChatId: replySrcChatId,
+              elements: elements,
+              beforeSend: checkSession,
+            );
+
+      final mounted = canUpdateChat();
+      final index = chatController.indexOfId(tempId);
+      if (!mounted || index != -1) {
+        final sentTime = _serverTimeOf(actualId, fallback: now);
+        final sent = CachedMessage(
+          id: actualId.isNotEmpty ? actualId : tempId,
+          accountId: accountId,
+          chatId: chatId,
+          senderId: accountId,
+          text: wireText,
+          time: sentTime,
+          status: 'sent',
+          payload: composedPayload,
+          sealedText: sealedText,
+          e2ee: e2eeFlag,
+        );
+        if (encrypted) {
+          MessageDecryptionCache.instance.adopt(tempId, sent.id);
+        }
+        if (mounted) {
+          chatController.setMessageAt(index, sent);
+          bumpMessages();
+        }
+        if (!commentsMode) {
+          MessageSessionCache.replace(accountId, chatId, tempId, (_) => sent);
+          if (sent.id != tempId) {
+            await AppDatabase.deleteMessage(accountId, chatId, tempId);
+          }
+          await chatController.persistOutgoing(sent);
+          unawaited(
+            chats.applyOutgoing(
+              accountId,
+              chatId,
+              messageId: sent.id,
+              time: sentTime,
+              text: wireText,
+              status: 'sent',
+              elements: elements,
+              replacesTime: now,
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (!persisted) {
+        logger.e('Не удалось сохранить исходящее сообщение: $e');
+        final index = chatController.indexOfId(tempId);
+        if (canUpdateChat()) {
+          if (index != -1) {
+            chatController.setMessageAt(
+              index,
+              composed.copyWith(status: 'error'),
+            );
+            bumpMessages();
+          }
+          notify(l10nOf().chatTextSendSaveFailed);
+        }
+        return;
+      }
+      if (replySrcChatId != null) {
+        logger.w('Cross-chat reply rejected: $e');
+        final index = chatController.indexOfId(tempId);
+        if (index != -1 && canUpdateChat()) {
+          chatController.removeMessageAt(index);
+          bumpMessages();
+        }
+        unawaited(AppDatabase.deleteMessage(accountId, chatId, tempId));
+        if (canUpdateChat()) {
+          Haptics.error();
+          notify(e.toString());
+        }
+        return;
+      }
+      final queued = composed.withSendFailure(e);
+      final status = queued.status!;
+      if (status == 'error') logger.w('Отправка отклонена сервером: $e');
+      if (!commentsMode &&
+          !await AppDatabase.updateSendingMessageStatus(
+            accountId,
+            chatId,
+            tempId,
+            status,
+          )) {
+        return;
+      }
+      final index = chatController.indexOfId(tempId);
+      if (index != -1 && canUpdateChat()) {
+        chatController.setMessageAt(index, queued);
+        bumpMessages();
+      }
+      if (!commentsMode) {
+        MessageSessionCache.replace(accountId, chatId, tempId, (_) => queued);
+        await chats.reconcileLastMessage(accountId, chatId);
+      }
+    }
+  }
+
+  CachedMessage _replaceMessage(
+    int index, {
+    String? id,
+    String? text,
+    String? status,
+  }) {
+    final old = chatController.messages[index];
+    final updated = CachedMessage(
+      id: id ?? old.id,
+      accountId: old.accountId,
+      chatId: old.chatId,
+      senderId: old.senderId,
+      text: text ?? old.text,
+      time: old.time,
+      status: status ?? old.status,
+      payload: old.payload,
+      attachments: old.attachments,
+      isControl: old.isControl,
+      editHistory: old.editHistory,
+      sealedText: old.sealedText,
+      e2ee: old.e2ee,
+    );
+    chatController.setMessageAt(index, updated);
+    bumpMessages();
+    return updated;
+  }
+
+  Future<String> postCommandMessage(String text) async {
+    if (!isMounted() || _myId == 0) return '';
+    final outgoing = await preparePluginOutgoingText(
+      text,
+      (plaintext) => encryptOutgoing(plaintext, notify: false),
+    );
+    if (!isMounted()) return '';
+    final tempId = chatController.nextTempId();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final online = _api.state == SessionState.online;
+    final composed = CachedMessage(
+      id: tempId,
+      accountId: _myId,
+      chatId: _chatId,
+      senderId: _myId,
+      text: outgoing.wireText,
+      time: now,
+      status: online ? 'sending' : 'pending',
+    );
+    if (outgoing.encrypted) {
+      MessageDecryptionCache.instance.seed(tempId, outgoing.plaintext);
+    }
+    chatController.addMessage(composed);
+    bumpMessages();
+    scrollToBottom();
+    unawaited(chatController.persistOutgoing(composed));
+    unawaited(
+      chats.applyOutgoing(
+        _myId,
+        _chatId,
+        messageId: tempId,
+        time: now,
+        text: outgoing.wireText,
+        status: composed.status ?? 'sending',
+      ),
+    );
+    if (!online) return tempId;
+    try {
+      final actualId = await _messages.sendMessage(
+        _myId,
+        _chatId,
+        outgoing.wireText,
+      );
+      final realId = actualId.isNotEmpty ? actualId : tempId;
+      final i = chatController.indexOfId(tempId);
+      if (i != -1) {
+        final sent = _replaceMessage(i, id: realId, status: 'sent');
+        if (outgoing.encrypted) {
+          MessageDecryptionCache.instance.adopt(tempId, realId);
+        }
+        unawaited(chatController.persistOutgoing(sent, removeId: tempId));
+        unawaited(
+          chats.applyOutgoing(
+            _myId,
+            _chatId,
+            messageId: realId,
+            time: now,
+            text: outgoing.wireText,
+            status: 'sent',
+          ),
+        );
+      }
+      return realId;
+    } catch (_) {
+      return tempId;
+    }
+  }
+
+  Future<void> updateCommandMessage(String id, String text) async {
+    if (id.isEmpty) return;
+    final outgoing = await preparePluginOutgoingText(
+      text,
+      (plaintext) => encryptOutgoing(plaintext, notify: false),
+    );
+    if (!isMounted()) return;
+    final i = chatController.indexOfId(id);
+    if (i != -1) {
+      final edited = _replaceMessage(
+        i,
+        text: outgoing.wireText,
+        status: 'EDITED',
+      );
+      if (outgoing.encrypted) {
+        MessageDecryptionCache.instance.seed(id, outgoing.plaintext);
+      }
+      unawaited(chatController.persistOutgoing(edited));
+    }
+    if (!id.startsWith('temp_')) {
+      await _messages.editMessage(_chatId, id, text: outgoing.wireText);
+    }
+  }
+}

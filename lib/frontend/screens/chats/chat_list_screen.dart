@@ -6,6 +6,7 @@ import 'package:material_symbols_icons/symbols.dart';
 import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
+import 'chat_preview_card.dart';
 import 'chat_screen.dart';
 import 'search_screen.dart';
 import 'create_channel_flow.dart';
@@ -14,20 +15,28 @@ import 'folder_action_sheet.dart';
 import 'folder_edit_sheet.dart';
 import '../contacts/add_contact_sheet.dart';
 import '../../widgets/adaptive_shell.dart';
+import '../../widgets/chat_call_badge.dart';
 import '../../../core/crypto/message_decryption_cache.dart';
 import '../../widgets/decrypted_text.dart';
 import '../../widgets/encryption_lock_badge.dart';
 import '../../widgets/online_dot.dart';
 import '../../widgets/custom_notification.dart';
+import '../../widgets/hint_bubble.dart';
+import '../../widgets/undo_notification.dart';
+import 'chat_removal_undo.dart';
+import '../contacts/find_user_sheet.dart';
 import '../../widgets/glossy_pill.dart';
 import '../../widgets/sheet_helpers.dart';
 import '../../widgets/swipe_route.dart';
+import '../../widgets/toast_placement.dart';
 import '../../widgets/sliding_pill_nav.dart';
 import '../../widgets/compact_bottom_navigation_bar.dart';
-import '../../widgets/main_navigation_items.dart';
 import '../../widgets/springy_tap.dart';
+import '../../widgets/visible_page_tickers.dart';
 import '../../widgets/informer_banner_tile.dart';
+import '../../../backend/modules/forward_sender.dart';
 import '../../../backend/modules/share_sender.dart';
+import '../../widgets/lottie_slash_icon.dart';
 import '../../../core/utils/logger.dart';
 import '../../../core/utils/format.dart';
 import '../../../models/shared_payload.dart';
@@ -47,6 +56,8 @@ import '../profile/settings_tab.dart';
 import '../auth/login_screen.dart';
 import '../digital_id/digital_id_web_screen.dart';
 import '../../widgets/account_switcher_overlay.dart';
+import '../../widgets/local_avatar_builder.dart';
+import '../../widgets/lost_account_dialog.dart';
 import 'chat/view/chat_list_shimmer.dart';
 import 'chat/view/chat_list_tile.dart';
 import 'chat/view/chat_preview_line.dart';
@@ -55,6 +66,9 @@ import '../../../backend/api.dart';
 import '../../../core/protocol/opcode_map.dart';
 import '../../../core/protocol/packet.dart';
 import '../../../core/utils/haptics.dart';
+import '../../../core/config/build_profile.dart';
+import '../../../core/config/ios_release.dart';
+import '../../../core/config/app_animations.dart';
 import '../../../core/config/app_frost.dart';
 import '../../../core/config/app_spectrum_background.dart';
 import '../../../core/config/app_nav_pill_style.dart';
@@ -70,9 +84,11 @@ import '../../../backend/modules/chats.dart';
 import '../../../backend/modules/cloud_storage.dart';
 import '../../../backend/modules/contacts.dart';
 import '../../../backend/modules/folders.dart';
+import '../../../core/cache/message_session_cache.dart';
 import '../../../core/storage/app_database.dart';
 import '../../../core/storage/draft_store.dart';
 import '../../../core/storage/archived_chats_store.dart';
+import '../../../core/crypto/e2ee_service.dart';
 import '../../../core/storage/chat_encryption_store.dart';
 import '../../../core/storage/token_storage.dart';
 import '../../../core/storage/chat_activity_store.dart';
@@ -101,8 +117,14 @@ import '../stories/story_viewer_screen.dart';
 import '../downloads_screen.dart';
 import '../../widgets/media_playback_pill.dart';
 import '../../../core/config/app_fonts.dart';
+import '../lock/lock_glyph.dart';
+import '../../../core/security/app_lock.dart';
 
 const String _savedWelcomeKey = 'welcome.saved.dialog.message';
+
+// #***! вкладки смонтированы все сразу, так что открытая вкладка это состояние,
+// а не отдельный экран: по нему вкладки понимают, что их только что открыли
+final ValueNotifier<int> activeNavTab = ValueNotifier<int>(0);
 
 class _StoriesScrollPhysics extends BouncingScrollPhysics {
   final bool Function() blockPositive;
@@ -154,10 +176,15 @@ class ForwardTarget {
 Future<ForwardTarget?> openForwardScreen({
   required BuildContext context,
   int messageCount = 1,
+  ForwardRequest? batch,
 }) {
   return pushSwipeable<ForwardTarget>(
     context,
-    (_) => ChatListScreen(forwardMode: true, forwardMessageCount: messageCount),
+    (_) => ChatListScreen(
+      forwardMode: true,
+      forwardMessageCount: messageCount,
+      forwardBatch: batch,
+    ),
   );
 }
 
@@ -165,6 +192,7 @@ class ChatListScreen extends StatefulWidget {
   final ValueChanged<DesktopChatSelection>? onChatSelected;
   final bool forwardMode;
   final int forwardMessageCount;
+  final ForwardRequest? forwardBatch;
   final bool archiveMode;
   final SharedPayload? sharePayload;
 
@@ -173,6 +201,7 @@ class ChatListScreen extends StatefulWidget {
     this.onChatSelected,
     this.forwardMode = false,
     this.forwardMessageCount = 1,
+    this.forwardBatch,
     this.archiveMode = false,
     this.sharePayload,
   });
@@ -222,6 +251,18 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   int _currentNavIndex = 0;
 
+  List<PillNavItem> _chatsNavItems(AppLocalizations l10n) => [
+    PillNavItem(icon: Symbols.chat_bubble, label: l10n.chatListNavChats),
+    PillNavItem(icon: Symbols.call, label: l10n.chatListNavCalls),
+    PillNavItem(icon: Symbols.person_pin, label: l10n.chatListNavContacts),
+    PillNavItem(
+      icon: Symbols.settings,
+      label: l10n.attachSheetSettings,
+      longPressable: true,
+      animationAsset: AppAnimations.settings,
+    ),
+  ];
+
   double _navPageAnimStart = 0;
   double _navPageAnimEnd = 0;
   final ValueNotifier<double> _navDragDx = ValueNotifier(0);
@@ -229,6 +270,12 @@ class _ChatListScreenState extends State<ChatListScreen>
   double _revealAnimBegin = 0.0;
   double _closeAnimBegin = 0.0;
   static const double _kStoriesPullTriggerPx = 16.0;
+  static const double _kArchivePullTriggerPx = 56.0;
+  bool _archiveRevealed = false;
+  bool _archivePullArmed = true;
+  bool _archiveRevealAnimates = false;
+  bool _collapsingArchive = false;
+  final GlobalKey _archiveEntryKey = GlobalKey();
 
   final _StoriesUi _storiesUi = _StoriesUi();
   double get _pullRatio => _storiesUi.pullRatio;
@@ -250,7 +297,11 @@ class _ChatListScreenState extends State<ChatListScreen>
   bool _reloadInFlight = false;
   Timer? _settleTimer;
   bool get _shareMode => widget.sharePayload != null;
-  bool get _isSelectionMode => !_shareMode && _selectedChats.isNotEmpty;
+  bool get _picksRecipients => _shareMode || widget.forwardBatch != null;
+  bool get _forwardPicking =>
+      widget.forwardBatch != null && _selectedChats.isNotEmpty;
+  bool get _isSelectionMode =>
+      !_shareMode && !widget.forwardMode && _selectedChats.isNotEmpty;
   bool? _foldersListKnown;
 
   late AnimationController _navPageAnimController;
@@ -267,14 +318,17 @@ class _ChatListScreenState extends State<ChatListScreen>
   RichMessageController? _shareCaption;
   PreparedShare? _preparedShare;
   bool _shareSending = false;
+  late bool _forwardHideSender = widget.forwardBatch?.hideSender ?? false;
+  final Map<int, int> _forwardProgress = {};
 
   DateTime _storiesRevealLayoutSettleUntil =
       DateTime.fromMillisecondsSinceEpoch(0);
   ProfileData? _profile;
 
   List<CachedChat> _chats = [];
+  List<CachedChat> _chatsWithArchived = [];
+  Set<int> _archivedIds = const {};
   int _archivedCount = 0;
-  int _archivedUnread = 0;
   bool _archiveHadChats = false;
 
   int _chatListRevision = 0;
@@ -331,6 +385,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   void _initShare() {
+    if (widget.forwardBatch != null) _shareCaption = RichMessageController();
     final payload = widget.sharePayload;
     if (payload == null) return;
     _shareCaption = RichMessageController(
@@ -343,7 +398,30 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
   }
 
-  void _toggleShareTarget(String chatId, String name) {
+  Future<void> _toggleRecipient(String chatId, String name) async {
+    final myId = _profile?.id ?? 0;
+    final chatIdValue = int.tryParse(chatId) ?? 0;
+    if (widget.forwardBatch != null && !_selectedChats.contains(chatId)) {
+      try {
+        await E2eeService.instance.ensureLoaded(myId);
+      } catch (_) {
+        if (mounted) {
+          showCustomNotification(
+            context,
+            AppLocalizations.of(context)!.forwardFailed,
+          );
+        }
+        return;
+      }
+      if (!mounted || _profile?.id != myId) return;
+      if (ForwardSender.isBlocked(myId, chatIdValue)) {
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.e2eeForwardBlocked,
+        );
+        return;
+      }
+    }
     Haptics.selection();
     setState(() {
       if (_selectedChats.remove(chatId)) {
@@ -356,10 +434,12 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   List<String> get _shareRecipientNames => [
-    for (final id in _selectedChats) _selectedChatNames[id] ?? 'Чат',
+    for (final id in _selectedChats)
+      _selectedChatNames[id] ?? AppLocalizations.of(context)!.hubChatTileTitle,
   ];
 
-  Future<void> _sendShare(String caption) async {
+  Future<void> _sendShare(RichMessageContent content) async {
+    final caption = content.text;
     final prepared = _preparedShare;
     final myId = _profile?.id ?? 0;
     if (prepared == null || myId == 0 || _selectedChats.isEmpty) return;
@@ -392,7 +472,10 @@ class _ChatListScreenState extends State<ChatListScreen>
 
     if (result == null) {
       Haptics.error();
-      showCustomNotification(context, 'Не удалось отправить');
+      showCustomNotification(
+        context,
+        AppLocalizations.of(context)!.chatListShareSendFailed,
+      );
       return;
     }
 
@@ -400,13 +483,17 @@ class _ChatListScreenState extends State<ChatListScreen>
     if (targets.length == 1) {
       final chatId = targets.first;
       final chat = _chats.where((c) => c.id == chatId).firstOrNull;
+      final name =
+          _selectedChatNames[chatId.toString()] ??
+          chat?.title ??
+          AppLocalizations.of(context)!.hubChatTileTitle;
       navigator.pop();
       unawaited(
         pushSwipeable(
           navigator.context,
           (_) => ChatScreen(
             chatId: chatId,
-            name: _selectedChatNames[chatId.toString()] ?? chat?.title ?? 'Чат',
+            name: name,
             imageUrl: chat?.iconUrl ?? '',
             chatType: chat?.type ?? 'DIALOG',
           ),
@@ -422,12 +509,121 @@ class _ChatListScreenState extends State<ChatListScreen>
     final controller = _shareCaption;
     if (prepared == null || controller == null) return const SizedBox.shrink();
     if (_selectedChats.isEmpty) return const SizedBox.shrink();
-    return ShareComposerBar(
+    return ShareComposerBar.forShare(
+      l10n: AppLocalizations.of(context)!,
       share: prepared,
       controller: controller,
       recipientNames: _shareRecipientNames,
       sending: _shareSending,
       onSend: _sendShare,
+    );
+  }
+
+  Widget _buildForwardComposer() {
+    final batch = widget.forwardBatch;
+    final controller = _shareCaption;
+    if (batch == null || controller == null || _selectedChats.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final l10n = AppLocalizations.of(context)!;
+    final cs = Theme.of(context).colorScheme;
+    final count = batch.messages.length;
+    return ShareComposerBar(
+      title: _forwardHideSender
+          ? count == 1
+                ? l10n.forwardWithoutSender
+                : l10n.forwardWithoutSenderCount(count)
+          : count == 1
+          ? l10n.forwardOneTitle
+          : l10n.forwardBatchTitle(count),
+      hintText: l10n.forwardCommentHint,
+      controller: controller,
+      recipientNames: _shareRecipientNames,
+      sending: _shareSending,
+      onSend: _sendForward,
+      headerAction: Builder(
+        builder: (buttonContext) => IconButton(
+          tooltip: _forwardHideSender
+              ? l10n.forwardShowSender
+              : l10n.forwardHideSender,
+          icon: LottieSlashIcon(
+            asset: 'assets/lottie/ic_person_on_to_off.json',
+            slashed: _forwardHideSender,
+            color: _forwardHideSender
+                ? cs.primary
+                : batch.canHideSender
+                ? cs.onSurfaceVariant
+                : cs.onSurfaceVariant.withValues(alpha: 0.38),
+            size: 20,
+          ),
+          onPressed: _shareSending
+              ? null
+              : () => _toggleForwardHideSender(buttonContext),
+        ),
+      ),
+    );
+  }
+
+  void _toggleForwardHideSender(BuildContext buttonContext) {
+    final batch = widget.forwardBatch;
+    if (batch == null) return;
+    if (!_forwardHideSender && !batch.canHideSender) {
+      Haptics.error();
+      showHintBubble(
+        buttonContext,
+        AppLocalizations.of(context)!.forwardHideSenderUnavailable,
+      );
+      return;
+    }
+    Haptics.selection();
+    setState(() => _forwardHideSender = !_forwardHideSender);
+  }
+
+  Future<void> _sendForward(RichMessageContent content) async {
+    final batch = widget.forwardBatch;
+    final myId = _profile?.id ?? 0;
+    if (batch == null || myId == 0 || _shareSending) return;
+    final targets = [for (final raw in _selectedChats) ?int.tryParse(raw)];
+    if (targets.isEmpty) return;
+    final l10n = AppLocalizations.of(context)!;
+    if (api.state != SessionState.online) {
+      showCustomNotification(context, l10n.forwardOffline);
+      return;
+    }
+    setState(() => _shareSending = true);
+    Haptics.send();
+    final result = await ForwardSender.send(
+      accountId: myId,
+      chatIds: targets,
+      request: batch.withHideSender(_forwardHideSender),
+      caption: ForwardCaption(content.text, content.elements),
+      resumeFrom: {..._forwardProgress},
+    );
+    if (!mounted) return;
+    final delivered = result.delivered.length;
+    final failed = result.unfinished.length;
+    if (failed == 0) {
+      setState(() => _shareSending = false);
+      showCustomNotification(context, l10n.forwardDelivered(delivered));
+      Navigator.of(context).pop();
+      return;
+    }
+    Haptics.error();
+    setState(() {
+      _shareSending = false;
+      _forwardProgress
+        ..clear()
+        ..addAll(result.unfinished);
+      for (final chatId in result.delivered) {
+        _selectedChats.remove('$chatId');
+        _selectedChatNames.remove('$chatId');
+      }
+    });
+    showCustomNotification(
+      context,
+      delivered == 0
+          ? l10n.forwardFailed
+          : l10n.forwardDeliveredPartly(delivered, failed),
     );
   }
 
@@ -500,7 +696,9 @@ class _ChatListScreenState extends State<ChatListScreen>
         context,
         errors.length == 1
             ? errors.first
-            : 'Не удалось изменить ${errors.length} чат(ов): ${errors.first}',
+            : AppLocalizations.of(
+                context,
+              )!.chatListMuteFailedCount(errors.length, errors.first),
       );
     }
     _clearSelection();
@@ -512,18 +710,33 @@ class _ChatListScreenState extends State<ChatListScreen>
     final p = _profile;
     if (p == null) return;
     final archive = !widget.archiveMode;
-    for (final c in selected) {
-      await ArchivedChatsStore.instance.setArchived(p.id, c.id, archive);
-    }
+    final chatIds = selected.map((c) => c.id).toList();
+    await _setArchived(p.id, chatIds, archive);
     if (!mounted) return;
     _clearSelection();
-    final count = selected.length;
-    showCustomNotification(
+    final l10n = AppLocalizations.of(context)!;
+    showUndoNotification(
       context,
       archive
-          ? (count == 1 ? 'Чат в архиве' : 'Чаты в архиве ($count)')
-          : (count == 1 ? 'Чат возвращён' : 'Чаты возвращены ($count)'),
+          ? l10n.undoChatsArchived(chatIds.length)
+          : l10n.undoChatsUnarchived(chatIds.length),
+      onUndo: () => unawaited(_setArchived(p.id, chatIds, !archive)),
+      onCommit: () {},
     );
+  }
+
+  Future<void> _setArchived(
+    int accountId,
+    List<int> chatIds,
+    bool archived,
+  ) async {
+    for (final chatId in chatIds) {
+      await ArchivedChatsStore.instance.setArchived(
+        accountId,
+        chatId,
+        archived,
+      );
+    }
   }
 
   Future<void> _onDeleteTap() async {
@@ -541,41 +754,44 @@ class _ChatListScreenState extends State<ChatListScreen>
     if (cats.contains(_DeleteKind.blocked) || cats.length > 1) {
       showCustomNotification(
         context,
-        'Статус чатов изменился, попробуйте ещё раз',
+        AppLocalizations.of(context)!.chatListDeleteStatusChanged,
       );
       return;
     }
     final kind = cats.single;
 
-    final confirmed = await _showDeleteConfirmDialog(selectedAfter, kind);
-    if (!mounted || confirmed != true) return;
+    final choice = await _showDeleteConfirmDialog(selectedAfter, kind);
+    if (!mounted || choice == null) return;
 
-    final errors = <String>[];
-    for (final c in selectedAfter) {
-      final forAll = kind == _DeleteKind.ownerGroup;
-      final err = await chats.deleteChat(
-        api,
-        chatId: c.id,
-        lastEventTime: c.lastEventTime,
-        forAll: forAll,
-      );
-      if (err != null) errors.add(err);
-    }
-    if (!mounted) return;
-    if (errors.isNotEmpty) {
-      final msg = errors.length == 1
-          ? errors.first
-          : 'Не удалось удалить ${errors.length} чат(ов): ${errors.first}';
-      showCustomNotification(context, msg);
-    }
+    final forAllById = {
+      for (final c in selectedAfter)
+        c.id: kind == _DeleteKind.ownerGroup || (choice.forAll && c.id != 0),
+    };
+    final lastEventById = {
+      for (final c in selectedAfter) c.id: c.lastEventTime,
+    };
     _clearSelection();
+    removeChatsWithUndo(
+      context,
+      message: AppLocalizations.of(
+        context,
+      )!.undoChatsDeleted(selectedAfter.length),
+      chatIds: forAllById.keys.toList(),
+      remove: (chatId) => chats.deleteChat(
+        api,
+        chatId: chatId,
+        lastEventTime: lastEventById[chatId]!,
+        forAll: forAllById[chatId]!,
+      ),
+    );
   }
 
-  Future<bool?> _showDeleteConfirmDialog(
+  Future<({bool forAll})?> _showDeleteConfirmDialog(
     List<CachedChat> selected,
     _DeleteKind kind,
   ) {
     final cs = Theme.of(context).colorScheme;
+    final l10n = AppLocalizations.of(context)!;
     final count = selected.length;
     final single = count == 1 ? selected.first : null;
 
@@ -585,28 +801,35 @@ class _ChatListScreenState extends State<ChatListScreen>
     switch (kind) {
       case _DeleteKind.personalLike:
         title = single != null
-            ? 'Удалить чат с ${single.title ?? ''}?'
-            : 'Удалить $count чатов?';
-        body = 'Восстановить переписку не получится';
-        primaryLabel = count == 1 ? 'Удалить чат' : 'Удалить';
+            ? l10n.chatListDeleteChatWith(single.title ?? '')
+            : l10n.chatListDeleteChatsCount(count);
+        body = l10n.chatListDeleteIrreversible;
+        primaryLabel = count == 1
+            ? l10n.chatInfoDeleteChatTitle
+            : l10n.chatInfoDeleteChatConfirm;
       case _DeleteKind.ownerGroup:
         title = single != null
-            ? 'Хотите удалить чат «${single.title ?? ''}»?'
-            : 'Удалить $count групп у всех?';
+            ? l10n.chatListDeleteOwnedChat(single.title ?? '')
+            : l10n.chatListDeleteGroupsForAll(count);
         body = single != null
-            ? 'Передайте права владельца, чтобы остальные участники могли продолжить общение'
-            : 'Действие нельзя отменить';
-        primaryLabel = count == 1 ? 'Удалить чат у всех' : 'Удалить у всех';
+            ? l10n.chatListDeleteOwnedChatBody
+            : l10n.chatListDeleteCannotUndo;
+        primaryLabel = count == 1
+            ? l10n.chatListDeleteChatForAll
+            : l10n.chatListDeleteForAll;
       case _DeleteKind.blocked:
-        return Future.value(false);
+        return Future.value(null);
     }
 
-    return showModalBottomSheet<bool>(
+    final offerForAll =
+        kind == _DeleteKind.personalLike && selected.any((c) => c.id != 0);
+    var forAll = false;
+    return showModalBottomSheet<({bool forAll})>(
       context: context,
       backgroundColor: cs.surfaceContainerHigh,
       shape: kSheetShape,
-      builder: (ctx) {
-        return SafeArea(
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
             child: Column(
@@ -626,6 +849,26 @@ class _ChatListScreenState extends State<ChatListScreen>
                   body,
                   style: TextStyle(color: cs.onSurfaceVariant, fontSize: 14),
                 ),
+                if (offerForAll) ...[
+                  const SizedBox(height: 8),
+                  InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () => setSheetState(() => forAll = !forAll),
+                    child: Row(
+                      children: [
+                        Checkbox(
+                          value: forAll,
+                          onChanged: (v) =>
+                              setSheetState(() => forAll = v ?? false),
+                        ),
+                        Text(
+                          l10n.chatInfoClearHistoryForAll,
+                          style: TextStyle(color: cs.onSurface, fontSize: 15),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 20),
                 if (kind == _DeleteKind.ownerGroup && single != null) ...[
                   Container(
@@ -636,7 +879,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                       borderRadius: BorderRadius.circular(22),
                     ),
                     child: Text(
-                      'Передать права и выйти',
+                      l10n.channelDeleteTransfer,
                       style: TextStyle(
                         color: cs.onSurface.withValues(alpha: 0.4),
                         fontSize: 14,
@@ -647,7 +890,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                   const SizedBox(height: 8),
                 ],
                 GestureDetector(
-                  onTap: () => Navigator.pop(ctx, true),
+                  onTap: () => Navigator.pop(ctx, (forAll: forAll)),
                   child: Container(
                     height: 44,
                     alignment: Alignment.center,
@@ -668,8 +911,8 @@ class _ChatListScreenState extends State<ChatListScreen>
               ],
             ),
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 
@@ -688,7 +931,25 @@ class _ChatListScreenState extends State<ChatListScreen>
     return false;
   }
 
+  void _onArchiveModeChanged() {
+    if (!mounted) return;
+    setState(() {
+      _archiveRevealed = false;
+      _archiveRevealAnimates = false;
+    });
+  }
+
+  bool get _archiveAwaitsPull =>
+      KometSettings.archiveOnPull.value &&
+      !_archiveRevealed &&
+      _shouldShowArchiveEntry(_selectedFolderIndex, ignorePull: true);
+
+  bool get _storiesStagePassed =>
+      !AppStories.current.value ||
+      (_storiesDockedOpen && !_storiesRevealController.isAnimating);
+
   bool _allowStoriesPullOverscrollTop() {
+    if (_archiveAwaitsPull && _storiesStagePassed) return true;
     if (!AppStories.current.value) return false;
     if (_storiesDockedOpen ||
         _storiesRevealController.isAnimating ||
@@ -753,13 +1014,15 @@ class _ChatListScreenState extends State<ChatListScreen>
         _maybeLoadStories();
       }
     });
-    chats.chatsChanged.addListener(_onChatsChanged);
+    chats.chatOrderRevision.addListener(_onChatsChanged);
     ArchivedChatsStore.instance.revision.addListener(_onArchivedChanged);
     ChatEncryptionStore.instance.revision.addListener(_onEncryptionChanged);
+    E2eeService.instance.revision.addListener(_onEncryptionChanged);
     DraftStore.instance.revision.addListener(_onDraftsChanged);
     AppStories.current.addListener(_onStoriesEnabledChanged);
     storiesModule.storiesChanged.addListener(_onStoriesDataChanged);
     KometSettings.hideAllChatsFolder.addListener(_requestReload);
+    KometSettings.archiveOnPull.addListener(_onArchiveModeChanged);
     KometSettings.showHiddenChats.addListener(_requestReload);
     ContactsModule.revision.addListener(_requestReload);
     FoldersModule.revision.addListener(_requestReload);
@@ -839,7 +1102,9 @@ class _ChatListScreenState extends State<ChatListScreen>
         .map((s) => s!.trim())
         .join(' ');
     return StoryOwnerInfo(
-      name: name.isEmpty ? 'Вы' : name,
+      name: name.isEmpty
+          ? AppLocalizations.of(context)!.callParticipantYou
+          : name,
       avatarUrl: p.baseUrl,
     );
   }
@@ -849,7 +1114,10 @@ class _ChatListScreenState extends State<ChatListScreen>
     final self = _selfOwnerInfo();
     if (me == null || self == null) return const {};
     return {
-      me: StoryOwnerInfo(name: 'Ваша история', avatarUrl: self.avatarUrl),
+      me: StoryOwnerInfo(
+        name: AppLocalizations.of(context)!.chatListYourStory,
+        avatarUrl: self.avatarUrl,
+      ),
     };
   }
 
@@ -951,31 +1219,28 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
 
     try {
-      final loadedChats = await chats.getChats(
+      final ensureLoadedFuture = chats.ensureLoaded(p.id);
+      final foldersFuture = FoldersModule.loadFolders(p.id);
+      final foldersKnownFuture = FoldersModule.hasReceivedFoldersList(p.id);
+      final contactsFuture = ContactsModule.getContacts(
         p.id,
+        includeDeleted: true,
+      );
+      await ensureLoadedFuture;
+      final loadedChats = chats.chatsSnapshot(
         includeHidden:
             widget.archiveMode || KometSettings.showHiddenChats.value,
       );
       final archivedIds = ArchivedChatsStore.instance.archivedChatIds(p.id);
       var archivedCount = 0;
-      var archivedUnread = 0;
       for (final c in loadedChats) {
         if (!archivedIds.contains(c.id)) continue;
         if (CloudStorageModule.isCloudStorageGroup(c)) continue;
         archivedCount++;
-        archivedUnread += c.unreadCount;
       }
-      var folders = await FoldersModule.loadFolders(p.id);
-      final foldersKnown = await FoldersModule.hasReceivedFoldersList(p.id);
-      final contactIds = (await ContactsModule.getContacts(
-        p.id,
-        includeDeleted: true,
-      )).map((c) => c.id).toSet();
-
-      const allChatsFolder = ChatFolder(
-        id: FoldersModule.allChatsFolderId,
-        title: 'Все чаты',
-      );
+      var folders = await foldersFuture;
+      final foldersKnown = await foldersKnownFuture;
+      final contactIds = (await contactsFuture).map((c) => c.id).toSet();
 
       if (widget.archiveMode) {
         folders = const [];
@@ -987,7 +1252,12 @@ class _ChatListScreenState extends State<ChatListScreen>
           folders = folders
               .where((f) => !FoldersModule.isAllChatsFolder(f))
               .toList();
-        } else if (!folders.any((f) => FoldersModule.isAllChatsFolder(f))) {
+        } else if (mounted &&
+            !folders.any((f) => FoldersModule.isAllChatsFolder(f))) {
+          final allChatsFolder = ChatFolder(
+            id: FoldersModule.allChatsFolderId,
+            title: AppLocalizations.of(context)!.chatListAllChatsFolder,
+          );
           folders = [allChatsFolder, ...folders];
         }
       }
@@ -995,8 +1265,10 @@ class _ChatListScreenState extends State<ChatListScreen>
       final pageCount = folders.isEmpty ? 1 : folders.length;
       _syncFolderChatScrollControllersForCount(pageCount);
 
-      final filteredChats = loadedChats
+      final visibleChats = loadedChats
           .where((c) => !CloudStorageModule.isCloudStorageGroup(c))
+          .toList();
+      final filteredChats = visibleChats
           .where(
             (c) => widget.archiveMode
                 ? archivedIds.contains(c.id)
@@ -1017,8 +1289,9 @@ class _ChatListScreenState extends State<ChatListScreen>
         setState(() {
           _profile = p;
           _chats = filteredChats;
+          _chatsWithArchived = visibleChats;
+          _archivedIds = archivedIds;
           _archivedCount = archivedCount;
-          _archivedUnread = archivedUnread;
           _contactIds = contactIds;
           _enteringChatIds = entering;
           _chatListRevision++;
@@ -1042,6 +1315,7 @@ class _ChatListScreenState extends State<ChatListScreen>
         _syncShimmer();
         _prefetchContactsForChats(loadedChats);
         unawaited(_prefetchPresenceForChats(loadedChats));
+        unawaited(_prefetchMessagesForChats(filteredChats));
         if (widget.archiveMode) {
           if (filteredChats.isNotEmpty) {
             _archiveHadChats = true;
@@ -1117,6 +1391,44 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   bool _presencePrefetchRunning = false;
+  bool _messagePrefetchRunning = false;
+
+  // #***! прогревает MessageSessionCache для верхних чатов списка, чтобы
+  // открытие чата, который пользователь ещё не заходил в этой сессии, было
+  // таким же мгновенным, как повторное открытие — то же поведение, что и
+  // у Telegram/TDLib, где last_message и последние сообщения топовых чатов
+  // уже лежат в локальной БД до тапа, а не читаются с диска в момент клика.
+  static const int _messagePrefetchTopN = 20;
+
+  Future<void> _prefetchMessagesForChats(List<CachedChat> chats) async {
+    if (_messagePrefetchRunning) return;
+    final myId = _profile?.id;
+    if (myId == null) return;
+    final targets = chats
+        .take(_messagePrefetchTopN)
+        .where((c) => MessageSessionCache.get(myId, c.id) == null)
+        .toList();
+    if (targets.isEmpty) return;
+    _messagePrefetchRunning = true;
+    try {
+      for (final target in targets) {
+        if (!mounted) return;
+        final rows = await AppDatabase.loadMessages(
+          myId,
+          target.id,
+          limit: 20,
+          onlyVisible: !KometSettings.viewDeleted.value,
+        );
+        if (rows.isEmpty) continue;
+        final decoded = rows.reversed
+            .map((r) => CachedMessage.fromDbRow(r))
+            .toList();
+        MessageSessionCache.save(myId, target.id, decoded, reachedStart: false);
+      }
+    } finally {
+      _messagePrefetchRunning = false;
+    }
+  }
 
   Set<int> _dialogPeerIds(List<CachedChat> chats) {
     final myId = _profile?.id;
@@ -1181,6 +1493,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   List<CachedChat> _chatsForPageIndex(int pageIndex) {
     final baseKey = Object.hash(
       identityHashCode(_chats),
+      identityHashCode(_chatsWithArchived),
       identityHashCode(_folders),
       identityHashCode(_contactIds),
     );
@@ -1201,16 +1514,13 @@ class _ChatListScreenState extends State<ChatListScreen>
       final myId = _profile?.id ?? 0;
       base = FoldersModule.isAllChatsFolder(folder)
           ? _chats
-          : _chats
-                .where(
-                  (c) => FoldersModule.chatMatchesFolder(
-                    c,
-                    folder,
-                    myId: myId,
-                    contactIds: _contactIds,
-                  ),
-                )
-                .toList();
+          : FoldersModule.chatsForFolder(
+              _chatsWithArchived,
+              folder,
+              myId: myId,
+              contactIds: _contactIds,
+              archivedIds: _archivedIds,
+            );
     }
     final pinned = base.where((c) => (c.favIndex ?? 0) > 0).toList()
       ..sort((a, b) => a.favIndex!.compareTo(b.favIndex!));
@@ -1268,6 +1578,13 @@ class _ChatListScreenState extends State<ChatListScreen>
     }
 
     if (offset < 0) {
+      if (_archiveAwaitsPull &&
+          _archivePullArmed &&
+          _storiesStagePassed &&
+          offset.abs() >= _kArchivePullTriggerPx) {
+        _revealArchive();
+        return;
+      }
       if (!_allowStoriesPullOverscrollTop()) {
         return;
       }
@@ -1284,6 +1601,8 @@ class _ChatListScreenState extends State<ChatListScreen>
         }
       }
     } else {
+      if (offset > 3) _archivePullArmed = false;
+      _collapseArchiveIfScrolledPast(c);
       if (_storiesDockedOpen &&
           offset > 12 &&
           DateTime.now().isAfter(_storiesRevealLayoutSettleUntil)) {
@@ -1416,6 +1735,7 @@ class _ChatListScreenState extends State<ChatListScreen>
 
     if (n is ScrollEndNotification) {
       if (n.metrics.pixels <= 0.5) {
+        _archivePullArmed = true;
         _storiesOverscrollRevealArmed = true;
         _storiesUi.notify();
       }
@@ -1458,13 +1778,15 @@ class _ChatListScreenState extends State<ChatListScreen>
     _shareCaption?.dispose();
     appRouteObserver.unsubscribe(this);
     _settleTimer?.cancel();
-    chats.chatsChanged.removeListener(_onChatsChanged);
+    chats.chatOrderRevision.removeListener(_onChatsChanged);
     ArchivedChatsStore.instance.revision.removeListener(_onArchivedChanged);
     ChatEncryptionStore.instance.revision.removeListener(_onEncryptionChanged);
+    E2eeService.instance.revision.removeListener(_onEncryptionChanged);
     DraftStore.instance.revision.removeListener(_onDraftsChanged);
     AppStories.current.removeListener(_onStoriesEnabledChanged);
     storiesModule.storiesChanged.removeListener(_onStoriesDataChanged);
     KometSettings.hideAllChatsFolder.removeListener(_requestReload);
+    KometSettings.archiveOnPull.removeListener(_onArchiveModeChanged);
     KometSettings.showHiddenChats.removeListener(_requestReload);
     ContactsModule.revision.removeListener(_requestReload);
     FoldersModule.revision.removeListener(_requestReload);
@@ -1526,6 +1848,7 @@ class _ChatListScreenState extends State<ChatListScreen>
     _navPageAnimStart = fromT;
     _navPageAnimEnd = index.toDouble();
     setState(() => _currentNavIndex = index);
+    activeNavTab.value = index;
     _navPageAnimController.forward(from: 0);
     if (index == 0) _scheduleInformerPresentation();
   }
@@ -1599,7 +1922,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       await openExternalUrl(context, url);
       return;
     }
-    if (!banner.isUpdate) return;
+    if (!banner.isUpdate || !BuildProfile.selfUpdate) return;
 
     final result = await UpdateChecker.checkNow();
     if (!mounted) return;
@@ -1739,15 +2062,23 @@ class _ChatListScreenState extends State<ChatListScreen>
                                         ),
                                       Flexible(
                                         child: Text(
-                                          _shareMode &&
+                                          _picksRecipients &&
                                                   _selectedChats.isNotEmpty
-                                              ? '${_selectedChats.length} '
-                                                    '${pluralRu(_selectedChats.length, 'получатель', 'получателя', 'получателей')}'
+                                              ? AppLocalizations.of(
+                                                  context,
+                                                )!.chatListRecipientsCount(
+                                                  _selectedChats.length,
+                                                )
                                               : connectionStatusLabel(
+                                                      AppLocalizations.of(
+                                                        context,
+                                                      )!,
                                                       _sessionState,
                                                     ) ??
                                                     (_profile?.firstName ??
-                                                        'Чат'),
+                                                        AppLocalizations.of(
+                                                          context,
+                                                        )!.hubChatTileTitle),
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
                                           style: TextStyle(
@@ -1781,6 +2112,10 @@ class _ChatListScreenState extends State<ChatListScreen>
                                         onPressed: () =>
                                             unawaited(_openDownloads()),
                                       ),
+                                    if (!widget.forwardMode &&
+                                        !widget.archiveMode &&
+                                        !_shareMode)
+                                      const _LockNowButton(),
                                     PopupMenuButton<int>(
                                       icon: Icon(
                                         Symbols.more_vert,
@@ -1797,12 +2132,16 @@ class _ChatListScreenState extends State<ChatListScreen>
                                       itemBuilder: (context) => [
                                         _buildPopupMenuItem(
                                           1,
-                                          'Избранное',
+                                          AppLocalizations.of(
+                                            context,
+                                          )!.chatListSavedMessages,
                                           Symbols.bookmark,
                                         ),
                                         _buildPopupMenuItem(
                                           2,
-                                          'Прочитать всё',
+                                          AppLocalizations.of(
+                                            context,
+                                          )!.chatListReadAll,
                                           Symbols.done_all,
                                         ),
                                       ],
@@ -1847,8 +2186,12 @@ class _ChatListScreenState extends State<ChatListScreen>
                                       const SizedBox(width: 10),
                                       Text(
                                         widget.forwardMode
-                                            ? 'Пересылка...'
-                                            : 'Поиск',
+                                            ? AppLocalizations.of(
+                                                context,
+                                              )!.chatListForwardingHint
+                                            : AppLocalizations.of(
+                                                context,
+                                              )!.chatInfoMembersSearchHint,
                                         style: TextStyle(
                                           color: cs.outline,
                                           fontSize: 15,
@@ -1902,7 +2245,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                               children: [
                                 for (var i = 0; i < _folders.length; i++) ...[
                                   if (i > 0) const SizedBox(width: 8),
-                                  _buildFolderChip(_folders[i]),
+                                  _buildFolderChip(_folders[i], i),
                                 ],
                               ],
                             );
@@ -1917,7 +2260,7 @@ class _ChatListScreenState extends State<ChatListScreen>
                                   for (var i = 0; i < _folders.length; i++) ...[
                                     if (i > 0) const SizedBox(width: 8),
                                     Expanded(
-                                      child: _buildFolderChip(_folders[i]),
+                                      child: _buildFolderChip(_folders[i], i),
                                     ),
                                   ],
                                 ],
@@ -1937,18 +2280,18 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   Widget _buildFolderChatPage(int pageIndex) {
-    final chats = _chatsForPageIndex(pageIndex);
+    final pageChats = _chatsForPageIndex(pageIndex);
     final sc = _folderChatScrollControllers[pageIndex];
     final cs = Theme.of(context).colorScheme;
     final pinnedCount = _isInitialLoading
         ? 0
-        : chats.where((c) => (c.favIndex ?? 0) > 0).length;
-    final hasSeparator = pinnedCount > 0 && pinnedCount < chats.length;
+        : pageChats.where((c) => (c.favIndex ?? 0) > 0).length;
+    final hasSeparator = pinnedCount > 0 && pinnedCount < pageChats.length;
     final totalItems = _isInitialLoading
         ? 10
-        : chats.length + (hasSeparator ? 1 : 0);
+        : pageChats.length + (hasSeparator ? 1 : 0);
     final idToIndex = <String, int>{
-      for (var i = 0; i < chats.length; i++) chats[i].id.toString(): i,
+      for (var i = 0; i < pageChats.length; i++) pageChats[i].id.toString(): i,
     };
     return NotificationListener<ScrollNotification>(
       onNotification: (ScrollNotification n) {
@@ -1976,12 +2319,12 @@ class _ChatListScreenState extends State<ChatListScreen>
         slivers: [
           const SliverToBoxAdapter(child: SizedBox(height: 8)),
           if (_shouldShowArchiveEntry(pageIndex))
-            SliverToBoxAdapter(child: _buildArchiveEntry(cs)),
-          if (chats.isEmpty && !_isInitialLoading)
+            SliverToBoxAdapter(child: _buildRevealableArchiveEntry(cs)),
+          if (pageChats.isEmpty && !_isInitialLoading)
             SliverFillRemaining(
               child: Center(
                 child: Text(
-                  'Кажется, тут пусто...',
+                  AppLocalizations.of(context)!.chatListEmpty,
                   style: TextStyle(
                     color: cs.onSurface.withValues(alpha: 0.6),
                     fontSize: 16,
@@ -2012,120 +2355,147 @@ class _ChatListScreenState extends State<ChatListScreen>
                   final chatIndex = hasSeparator && index > pinnedCount
                       ? index - 1
                       : index;
-                  final chat = chats[chatIndex];
-                  final isPinned = (chat.favIndex ?? 0) > 0;
+                  final baseChat = pageChats[chatIndex];
+                  return ValueListenableBuilder<CachedChat>(
+                    valueListenable: chats.chatListenable(baseChat),
+                    builder: (context, chat, _) {
+                      final isPinned = (chat.favIndex ?? 0) > 0;
 
-                  if (chat.type.isNotEmpty &&
-                      chat.type == "DIALOG" &&
-                      chat.id != 0) {
-                    int secondId = _profile?.id ?? 0;
-                    for (final entry in chat.participants.entries) {
-                      if (entry.key != _profile?.id) {
-                        secondId = entry.key;
-                        break;
+                      if (chat.type.isNotEmpty &&
+                          chat.type == "DIALOG" &&
+                          chat.id != 0) {
+                        int secondId = _profile?.id ?? 0;
+                        for (final entry in chat.participants.entries) {
+                          if (entry.key != _profile?.id) {
+                            secondId = entry.key;
+                            break;
+                          }
+                        }
+                        final name = ContactCache.get(secondId) ?? chat.title;
+                        final avatar =
+                            ContactCache.getAvatar(secondId) ?? chat.iconUrl;
+                        final isVerified =
+                            ContactCache.isOfficial(secondId) ||
+                            chat.isOfficial;
+
+                        final isPlaceholder = chat.isLastMsgDeleted;
+                        final previewText = isPlaceholder
+                            ? AppLocalizations.of(context)!.chatListOpenToLoad
+                            : (chat.lastMsgTextOneLine ?? '');
+                        return _animateChatTile(
+                          chat.id.toString(),
+                          _buildChatItem(
+                            chat.id.toString(),
+                            name ??
+                                AppLocalizations.of(
+                                  context,
+                                )!.msgActionsReadByUnknownUser,
+                            previewText,
+                            _formatTime(chat.lastMsgTime),
+                            avatar ?? "",
+                            presenceUserId: secondId,
+                            unreadCount: chat.unreadCount,
+                            hasMention: chat.hasUnreadMention,
+                            isMuted: chat.isMuted,
+                            isVerified: isVerified,
+                            isPinned: isPinned,
+                            chatType: "DIALOG",
+                            messageItalic: isPlaceholder,
+                            draft: _draftFor(chat.id),
+                            ownStatus: _ownStatusFor(chat, isPlaceholder),
+                            ownRead: chat.lastMsgReadByOthers,
+                            messageRanges: isPlaceholder
+                                ? const []
+                                : chat.lastMsgFormatRanges,
+                            previewMessageId: isPlaceholder
+                                ? null
+                                : chat.lastMsgId,
+                            previewCipherText: isPlaceholder
+                                ? null
+                                : chat.lastMsgTextOneLine,
+                            previewMedia: isPlaceholder
+                                ? null
+                                : chat.lastMsgMedia,
+                            titleIcon: chatKindIcon(
+                              'DIALOG',
+                              isBot: _isBotDialog(secondId, chat),
+                            ),
+                            hasMiniApp: _hasMiniApp(secondId, chat),
+                            hasCall: chat.activeCall != null,
+                          ),
+                        );
+                      } else {
+                        final isPlaceholder = chat.isLastMsgDeleted;
+                        final isSavedWelcome =
+                            chat.id == 0 &&
+                            chat.lastMsgText == _savedWelcomeKey;
+                        final sender = chat.lastMsgSenderId != null
+                            ? ContactCache.get(chat.lastMsgSenderId!)
+                            : null;
+
+                        final senderPrefix =
+                            !isPlaceholder &&
+                                sender?.isNotEmpty == true &&
+                                chat.id != 0
+                            ? "$sender: "
+                            : "";
+                        final body = isPlaceholder
+                            ? AppLocalizations.of(context)!.chatListOpenToLoad
+                            : isSavedWelcome
+                            ? AppLocalizations.of(
+                                context,
+                              )!.savedMessagesEmptyPreview
+                            : (chat.lastMsgTextOneLine ?? '');
+
+                        return _animateChatTile(
+                          chat.id.toString(),
+                          _buildChatItem(
+                            chat.id.toString(),
+                            chat.id == 0
+                                ? AppLocalizations.of(
+                                    context,
+                                  )!.chatListSavedMessages
+                                : chat.title ??
+                                      AppLocalizations.of(
+                                        context,
+                                      )!.hubChatTileTitle,
+                            body,
+                            _formatTime(chat.lastMsgTime),
+                            (chat.iconUrl != null && chat.iconUrl!.isNotEmpty)
+                                ? chat.iconUrl!
+                                : '',
+                            unreadCount: chat.unreadCount,
+                            hasMention: chat.hasUnreadMention,
+                            isMuted: chat.isMuted,
+                            isVerified: chat.isOfficial,
+                            isPinned: isPinned,
+                            chatType: chat.type,
+                            messageItalic: isPlaceholder || isSavedWelcome,
+                            draft: chat.id == 0 ? null : _draftFor(chat.id),
+                            ownStatus: _ownStatusFor(chat, isPlaceholder),
+                            ownRead: chat.lastMsgReadByOthers,
+                            messageRanges: isPlaceholder || isSavedWelcome
+                                ? const []
+                                : chat.lastMsgFormatRanges,
+                            previewMessageId: isPlaceholder
+                                ? null
+                                : chat.lastMsgId,
+                            previewPrefix: senderPrefix,
+                            previewCipherText: isPlaceholder || isSavedWelcome
+                                ? null
+                                : chat.lastMsgText,
+                            previewMedia: isPlaceholder
+                                ? null
+                                : chat.lastMsgMedia,
+                            titleIcon: chat.id == 0
+                                ? null
+                                : chatKindIcon(chat.type, isBot: false),
+                            hasCall: chat.activeCall != null,
+                          ),
+                        );
                       }
-                    }
-                    final name = ContactCache.get(secondId) ?? chat.title;
-                    final avatar =
-                        ContactCache.getAvatar(secondId) ?? chat.iconUrl;
-                    final isVerified =
-                        ContactCache.isOfficial(secondId) || chat.isOfficial;
-
-                    final isPlaceholder = chat.isLastMsgDeleted;
-                    final previewText = isPlaceholder
-                        ? 'зайдите в чат для подгрузки'
-                        : (chat.lastMsgTextOneLine ?? '');
-                    return _animateChatTile(
-                      chat.id.toString(),
-                      _buildChatItem(
-                        chat.id.toString(),
-                        name ?? "Пользователь",
-                        previewText,
-                        _formatTime(chat.lastMsgTime),
-                        avatar ?? "",
-                        presenceUserId: secondId,
-                        unreadCount: chat.unreadCount,
-                        hasMention: chat.hasUnreadMention,
-                        isMuted: chat.isMuted,
-                        isVerified: isVerified,
-                        isPinned: isPinned,
-                        chatType: "DIALOG",
-                        messageItalic: isPlaceholder,
-                        draft: _draftFor(chat.id),
-                        ownStatus: _ownStatusFor(chat, isPlaceholder),
-                        ownRead: chat.lastMsgReadByOthers,
-                        messageRanges: isPlaceholder
-                            ? const []
-                            : chat.lastMsgFormatRanges,
-                        previewMessageId: isPlaceholder ? null : chat.lastMsgId,
-                        previewCipherText: isPlaceholder
-                            ? null
-                            : chat.lastMsgTextOneLine,
-                        previewMedia: isPlaceholder ? null : chat.lastMsgMedia,
-                        titleIcon: chatKindIcon(
-                          'DIALOG',
-                          isBot: _isBotDialog(secondId, chat),
-                        ),
-                        hasMiniApp: _hasMiniApp(secondId, chat),
-                      ),
-                    );
-                  } else {
-                    final isPlaceholder = chat.isLastMsgDeleted;
-                    final isSavedWelcome =
-                        chat.id == 0 && chat.lastMsgText == _savedWelcomeKey;
-                    final sender = chat.lastMsgSenderId != null
-                        ? ContactCache.get(chat.lastMsgSenderId!)
-                        : null;
-
-                    final senderPrefix =
-                        !isPlaceholder &&
-                            sender?.isNotEmpty == true &&
-                            chat.id != 0
-                        ? "$sender: "
-                        : "";
-                    final body = isPlaceholder
-                        ? 'зайдите в чат для подгрузки'
-                        : isSavedWelcome
-                        ? AppLocalizations.of(
-                            context,
-                          )!.savedMessagesEmptyPreview
-                        : (chat.lastMsgTextOneLine ?? '');
-
-                    return _animateChatTile(
-                      chat.id.toString(),
-                      _buildChatItem(
-                        chat.id.toString(),
-                        chat.id == 0 ? "Избранное" : chat.title ?? "Чат",
-                        body,
-                        _formatTime(chat.lastMsgTime),
-                        (chat.iconUrl != null && chat.iconUrl!.isNotEmpty)
-                            ? chat.iconUrl!
-                            : '',
-                        unreadCount: chat.unreadCount,
-                        hasMention: chat.hasUnreadMention,
-                        isMuted: chat.isMuted,
-                        isVerified: chat.isOfficial,
-                        isPinned: isPinned,
-                        chatType: chat.type,
-                        messageItalic: isPlaceholder || isSavedWelcome,
-                        draft: chat.id == 0 ? null : _draftFor(chat.id),
-                        ownStatus: _ownStatusFor(chat, isPlaceholder),
-                        ownRead: chat.lastMsgReadByOthers,
-                        messageRanges: isPlaceholder || isSavedWelcome
-                            ? const []
-                            : chat.lastMsgFormatRanges,
-                        previewMessageId: isPlaceholder ? null : chat.lastMsgId,
-                        previewPrefix: senderPrefix,
-                        previewCipherText: isPlaceholder || isSavedWelcome
-                            ? null
-                            : chat.lastMsgText,
-                        previewMedia: isPlaceholder ? null : chat.lastMsgMedia,
-                        titleIcon: chat.id == 0
-                            ? null
-                            : chatKindIcon(chat.type, isBot: false),
-                      ),
-                    );
-                  }
+                    },
+                  );
                 },
                 childCount: totalItems,
                 findChildIndexCallback: (Key key) {
@@ -2278,6 +2648,7 @@ class _ChatListScreenState extends State<ChatListScreen>
               _currentNavIndex = next;
               _navDragging = false;
             });
+            activeNavTab.value = next;
             if (next == 0) _scheduleInformerPresentation();
           },
           onHorizontalDragCancel: () {
@@ -2298,20 +2669,22 @@ class _ChatListScreenState extends State<ChatListScreen>
                             4) /
                         inactiveWidth
                   : _currentNavIndex.toDouble();
-              return SlidingPillNav(
-                items: mainNavigationItems,
-                position: position,
-                animationDuration: _navDragging
-                    ? Duration.zero
-                    : const Duration(milliseconds: 350),
-                geometry: geometry,
-                iconSize: 20,
-                labelGap: 4,
-                backdropKey: _frostBackdrop,
-                onTap: _onNavTabSelected,
-                onItemLongPress: (index, pos) {
-                  if (index == 3) _openAccountSwitcher(pos);
-                },
+              return ToastObstruction(
+                child: SlidingPillNav(
+                  items: _chatsNavItems(AppLocalizations.of(context)!),
+                  position: position,
+                  animationDuration: _navDragging
+                      ? Duration.zero
+                      : const Duration(milliseconds: 350),
+                  geometry: geometry,
+                  iconSize: 20,
+                  labelGap: 4,
+                  backdropKey: _frostBackdrop,
+                  onTap: _onNavTabSelected,
+                  onItemLongPress: (index, pos) {
+                    if (index == 3) _openAccountSwitcher(pos);
+                  },
+                ),
               );
             },
           ),
@@ -2340,7 +2713,13 @@ class _ChatListScreenState extends State<ChatListScreen>
         child: LayoutBuilder(
           builder: (context, constraints) {
             if (widget.forwardMode) {
-              return _getChatsBody();
+              if (widget.forwardBatch == null) return _getChatsBody();
+              return Column(
+                children: [
+                  Expanded(child: _getChatsBody()),
+                  _buildForwardComposer(),
+                ],
+              );
             }
             if (_shareMode) {
               return Column(
@@ -2374,6 +2753,28 @@ class _ChatListScreenState extends State<ChatListScreen>
               }
               return lo + 4;
             }
+
+            final pageMotion = Listenable.merge([
+              _navPageAnimController,
+              _navDragDx,
+            ]);
+            double pagePosition() => _effectivePageNavRowT(
+              inactiveWidth: inactiveWidth,
+              bubbleLeftForIndex: bubbleLeftForPageT,
+            );
+            Widget page(int index, Widget body) => RepaintBoundary(
+              child: SizedBox(
+                width: pageW,
+                height: pageH,
+                child: VisiblePageTickers(
+                  index: index,
+                  enabled: IosRelease.isIOS,
+                  positionChanges: pageMotion,
+                  pagePosition: pagePosition,
+                  child: body,
+                ),
+              ),
+            );
 
             return Stack(
               children: [
@@ -2419,38 +2820,21 @@ class _ChatListScreenState extends State<ChatListScreen>
                           child: Row(
                             crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              RepaintBoundary(
-                                child: SizedBox(
-                                  width: pageW,
-                                  height: pageH,
-                                  child: _getChatsBody(),
+                              page(0, _getChatsBody()),
+                              page(
+                                1,
+                                CallsTab(bottomPadding: contentBottomPadding),
+                              ),
+                              page(
+                                2,
+                                ContactsTab(
+                                  bottomPadding: contentBottomPadding,
                                 ),
                               ),
-                              RepaintBoundary(
-                                child: SizedBox(
-                                  width: pageW,
-                                  height: pageH,
-                                  child: CallsTab(
-                                    bottomPadding: contentBottomPadding,
-                                  ),
-                                ),
-                              ),
-                              RepaintBoundary(
-                                child: SizedBox(
-                                  width: pageW,
-                                  height: pageH,
-                                  child: ContactsTab(
-                                    bottomPadding: contentBottomPadding,
-                                  ),
-                                ),
-                              ),
-                              RepaintBoundary(
-                                child: SizedBox(
-                                  width: pageW,
-                                  height: pageH,
-                                  child: SettingsTab(
-                                    bottomPadding: contentBottomPadding,
-                                  ),
+                              page(
+                                3,
+                                SettingsTab(
+                                  bottomPadding: contentBottomPadding,
                                 ),
                               ),
                             ],
@@ -2476,13 +2860,15 @@ class _ChatListScreenState extends State<ChatListScreen>
                       left: 0,
                       right: 0,
                       bottom: 0,
-                      child: CompactBottomNavigationBar(
-                        items: mainNavigationItems,
-                        currentIndex: _currentNavIndex,
-                        onTap: _onNavTabSelected,
-                        onItemLongPress: (index, position) {
-                          if (index == 3) _openAccountSwitcher(position);
-                        },
+                      child: ToastObstruction(
+                        child: CompactBottomNavigationBar(
+                          items: _chatsNavItems(AppLocalizations.of(context)!),
+                          currentIndex: _currentNavIndex,
+                          onTap: _onNavTabSelected,
+                          onItemLongPress: (index, position) {
+                            if (index == 3) _openAccountSwitcher(position);
+                          },
+                        ),
                       ),
                     ),
                 ] else
@@ -2540,47 +2926,51 @@ class _ChatListScreenState extends State<ChatListScreen>
                           Positioned(
                             right: 20,
                             bottom: fabBottom,
-                            child: ValueListenableBuilder<VisualStyle>(
-                              valueListenable: AppVisualStyle.current,
-                              builder: (context, style, child) =>
-                                  ValueListenableBuilder<NavPillStyle>(
-                                    valueListenable: AppNavPillStyle.current,
-                                    builder: (context, navStyle, child) {
-                                      final liquid =
-                                          style.glossyChrome &&
-                                          NavPillMaterial.isLiquid(navStyle);
-                                      final frost =
-                                          style.glossyChrome &&
-                                          NavPillMaterial.isFrost(navStyle);
-                                      return GlossyPill(
-                                        onTap: _toggleFab,
-                                        color: frost || liquid
-                                            ? AppFrost.glassTint(cs)
-                                            : cs.primaryContainer,
-                                        blurSigma: frost
-                                            ? AppFrost.sigma
-                                            : null,
-                                        liquid: liquid,
-                                        backdropKey: _frostBackdrop,
-                                        borderRadius: BorderRadius.circular(28),
-                                        elevated: true,
-                                        depth: 12,
-                                        child: child!,
-                                      );
-                                    },
-                                    child: child,
-                                  ),
-                              child: SizedBox(
-                                width: 56,
-                                height: 56,
-                                child: Center(
-                                  child: Transform.rotate(
-                                    angle: val * (pi / 4),
-                                    child: Icon(
-                                      Symbols.add,
-                                      color: cs.onPrimaryContainer,
-                                      size: 28,
-                                      weight: 400,
+                            child: ToastObstruction(
+                              child: ValueListenableBuilder<VisualStyle>(
+                                valueListenable: AppVisualStyle.current,
+                                builder: (context, style, child) =>
+                                    ValueListenableBuilder<NavPillStyle>(
+                                      valueListenable: AppNavPillStyle.current,
+                                      builder: (context, navStyle, child) {
+                                        final liquid =
+                                            style.glossyChrome &&
+                                            NavPillMaterial.isLiquid(navStyle);
+                                        final frost =
+                                            style.glossyChrome &&
+                                            NavPillMaterial.isFrost(navStyle);
+                                        return GlossyPill(
+                                          onTap: _toggleFab,
+                                          color: frost || liquid
+                                              ? AppFrost.glassTint(cs)
+                                              : cs.primaryContainer,
+                                          blurSigma: frost
+                                              ? AppFrost.sigma
+                                              : null,
+                                          liquid: liquid,
+                                          backdropKey: _frostBackdrop,
+                                          borderRadius: BorderRadius.circular(
+                                            28,
+                                          ),
+                                          elevated: true,
+                                          depth: 12,
+                                          child: child!,
+                                        );
+                                      },
+                                      child: child,
+                                    ),
+                                child: SizedBox(
+                                  width: 56,
+                                  height: 56,
+                                  child: Center(
+                                    child: Transform.rotate(
+                                      angle: val * (pi / 4),
+                                      child: Icon(
+                                        Symbols.add,
+                                        color: cs.onPrimaryContainer,
+                                        size: 28,
+                                        weight: 400,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -2634,7 +3024,7 @@ class _ChatListScreenState extends State<ChatListScreen>
             ),
             const SizedBox(width: 4),
             Text(
-              'Архив',
+              AppLocalizations.of(context)!.chatListArchive,
               style: TextStyle(
                 color: cs.onSurface,
                 fontSize: 20,
@@ -2648,15 +3038,64 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
   }
 
-  bool _shouldShowArchiveEntry(int pageIndex) {
+  bool _shouldShowArchiveEntry(int pageIndex, {bool ignorePull = false}) {
     if (widget.archiveMode || widget.forwardMode) return false;
     if (_isInitialLoading) return false;
     if (_archivedCount <= 0) return false;
+    if (!ignorePull && KometSettings.archiveOnPull.value && !_archiveRevealed) {
+      return false;
+    }
     if (_folders.isEmpty) return pageIndex == 0;
     final allIdx = _folders.indexWhere(
       (f) => FoldersModule.isAllChatsFolder(f),
     );
     return pageIndex == (allIdx >= 0 ? allIdx : 0);
+  }
+
+  void _revealArchive() {
+    Haptics.medium();
+    setState(() {
+      _archiveRevealed = true;
+      _archiveRevealAnimates = true;
+    });
+  }
+
+  void _collapseArchiveIfScrolledPast(ScrollController c) {
+    if (_collapsingArchive || !_archiveRevealed) return;
+    if (!KometSettings.archiveOnPull.value) return;
+    final box = _archiveEntryKey.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) return;
+    final height = box.size.height;
+    if (c.offset <= height + 8) return;
+    _collapsingArchive = true;
+    setState(() {
+      _archiveRevealed = false;
+      _archiveRevealAnimates = false;
+    });
+    c.jumpTo(c.offset - height);
+    _collapsingArchive = false;
+  }
+
+  Widget _buildRevealableArchiveEntry(ColorScheme cs) {
+    final entry = KeyedSubtree(
+      key: _archiveEntryKey,
+      child: _buildArchiveEntry(cs),
+    );
+    if (!_archiveRevealAnimates) return entry;
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+      onEnd: () => _archiveRevealAnimates = false,
+      builder: (context, t, child) => ClipRect(
+        child: Align(
+          alignment: Alignment.bottomCenter,
+          heightFactor: t,
+          child: Opacity(opacity: t, child: child),
+        ),
+      ),
+      child: entry,
+    );
   }
 
   Widget _buildArchiveEntry(ColorScheme cs) {
@@ -2681,7 +3120,7 @@ class _ChatListScreenState extends State<ChatListScreen>
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                'Архив',
+                AppLocalizations.of(context)!.chatListArchive,
                 style: TextStyle(
                   color: cs.onSurface,
                   fontSize: 16,
@@ -2689,23 +3128,34 @@ class _ChatListScreenState extends State<ChatListScreen>
                 ),
               ),
             ),
-            if (_archivedUnread > 0)
-              Container(
-                margin: const EdgeInsets.only(right: 8),
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                decoration: BoxDecoration(
-                  color: cs.primary,
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
-                  _archivedUnread > 99 ? '99+' : '$_archivedUnread',
-                  style: TextStyle(
-                    color: cs.onPrimary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
+            ValueListenableBuilder<int>(
+              valueListenable: chats.chatsChanged,
+              builder: (context, _, _) {
+                final unread = _liveUnread(
+                  _chatsWithArchived.where((c) => _archivedIds.contains(c.id)),
+                ).total;
+                if (unread <= 0) return const SizedBox.shrink();
+                return Container(
+                  margin: const EdgeInsets.only(right: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 7,
+                    vertical: 2,
                   ),
-                ),
-              ),
+                  decoration: BoxDecoration(
+                    color: cs.primary,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    unread > 99 ? '99+' : '$unread',
+                    style: TextStyle(
+                      color: cs.onPrimary,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                );
+              },
+            ),
             Icon(Symbols.chevron_right, color: cs.outline),
           ],
         ),
@@ -2811,7 +3261,7 @@ class _ChatListScreenState extends State<ChatListScreen>
             selfInfo: selfInfo == null
                 ? null
                 : StoryOwnerInfo(
-                    name: 'Ваша история',
+                    name: AppLocalizations.of(context)!.chatListYourStory,
                     avatarUrl: selfInfo.avatarUrl,
                   ),
             onOpen: (center) => _openStories(myIndex < 0 ? 0 : myIndex, center),
@@ -2830,7 +3280,7 @@ class _ChatListScreenState extends State<ChatListScreen>
   Future<void> _composeStory() async {
     await showAttachmentSheet(
       context,
-      title: 'Новая история',
+      title: AppLocalizations.of(context)!.chatListNewStory,
       onSend: (photos, caption) async {
         if (photos.isEmpty) return;
         final picked = photos.first;
@@ -2843,7 +3293,9 @@ class _ChatListScreenState extends State<ChatListScreen>
           if (mounted) {
             showCustomNotification(
               context,
-              isVideo ? 'Не удалось открыть видео' : 'Не удалось открыть фото',
+              isVideo
+                  ? AppLocalizations.of(context)!.chatListOpenVideoFailed
+                  : AppLocalizations.of(context)!.chatListOpenPhotoFailed,
             );
           }
           return;
@@ -2887,7 +3339,20 @@ class _ChatListScreenState extends State<ChatListScreen>
     return true;
   }
 
-  Widget _buildFolderChip(ChatFolder folder) {
+  static ({int total, int loud}) _liveUnread(Iterable<CachedChat> list) {
+    var total = 0;
+    var loud = 0;
+    for (final stale in list) {
+      final chat = chats.chatListenable(stale).value;
+      final count = chat.unreadCount;
+      if (count <= 0) continue;
+      total += count;
+      if (!chat.isMuted) loud += count;
+    }
+    return (total: total, loud: loud);
+  }
+
+  Widget _buildFolderChip(ChatFolder folder, int pageIndex) {
     final cs = Theme.of(context).colorScheme;
     final folderId = folder.id;
     final isSelected = _selectedFolderId == folderId;
@@ -2903,14 +3368,39 @@ class _ChatListScreenState extends State<ChatListScreen>
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
         depth: 4,
         child: Center(
-          child: Text(
-            _folderChipLabel(folder),
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: isSelected ? cs.onPrimaryContainer : cs.primary,
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-            ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  _folderChipLabel(folder),
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: isSelected ? cs.onPrimaryContainer : cs.primary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+              ValueListenableBuilder<int>(
+                valueListenable: chats.chatsChanged,
+                builder: (context, _, _) {
+                  final (:total, :loud) = _liveUnread(
+                    _chatsForPageIndex(pageIndex),
+                  );
+                  if (total <= 0) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: _countBadge(
+                      cs,
+                      total > 99 ? '99+' : '$total',
+                      muted: loud == 0,
+                    ),
+                  );
+                },
+              ),
+            ],
           ),
         ),
       ),
@@ -2974,7 +3464,7 @@ class _ChatListScreenState extends State<ChatListScreen>
         TextSpan(
           children: [
             TextSpan(
-              text: 'Черновик: ',
+              text: AppLocalizations.of(context)!.chatListDraftPrefix,
               style: TextStyle(color: cs.error),
             ),
             TextSpan(
@@ -3029,6 +3519,88 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
   }
 
+  bool get _canPreviewChats =>
+      !widget.forwardMode && !_shareMode && !_isSelectionMode;
+
+  void _openChatFromList(
+    String id,
+    String name,
+    String imageUrl,
+    String chatType,
+  ) {
+    if (imageUrl.isNotEmpty) {
+      unawaited(
+        precacheImage(
+          CachedNetworkImageProvider(
+            imageUrl,
+            maxWidth: kAvatarThumbSize,
+            maxHeight: kAvatarThumbSize,
+          ),
+          context,
+        ),
+      );
+    }
+    if (widget.onChatSelected != null) {
+      widget.onChatSelected!(
+        DesktopChatSelection(
+          chatId: int.parse(id),
+          name: name,
+          imageUrl: imageUrl,
+          chatType: chatType,
+        ),
+      );
+    } else {
+      pushSwipeable(
+        context,
+        (context) => ChatScreen(
+          chatId: int.parse(id),
+          name: name,
+          imageUrl: imageUrl,
+          chatType: chatType,
+        ),
+      );
+    }
+  }
+
+  CachedChat? _chatById(int chatId) {
+    for (final chat in _chatsWithArchived) {
+      if (chat.id == chatId) return chats.chatListenable(chat).value;
+    }
+    return null;
+  }
+
+  void _previewChat(String id, String name, String imageUrl, String chatType) {
+    final chatId = int.tryParse(id);
+    if (chatId == null) return;
+    final chat = _chatById(chatId);
+    unawaited(
+      showChatPreview(
+        context,
+        chatId: chatId,
+        name: name,
+        imageUrl: imageUrl,
+        chatType: chatType,
+        hasUnread: (chat?.unreadCount ?? 0) > 0 && chat?.lastMsgId != null,
+        onOpen: () => _openChatFromList(id, name, imageUrl, chatType),
+        onMarkRead: () => _markChatRead(chatId),
+      ),
+    );
+  }
+
+  Future<void> _markChatRead(int chatId) async {
+    final myId = _profile?.id;
+    final chat = _chatById(chatId);
+    final lastId = chat?.lastMsgId;
+    if (myId == null || chat == null || lastId == null) return;
+    await chats.markRead(
+      api,
+      myId,
+      chatId,
+      lastId.toString(),
+      chat.lastMsgTime ?? 0,
+    );
+  }
+
   Widget _buildChatItem(
     String id,
     String name,
@@ -3054,13 +3626,22 @@ class _ChatListScreenState extends State<ChatListScreen>
     ChatPreviewMedia? previewMedia,
     IconData? titleIcon,
     bool hasMiniApp = false,
+    bool hasCall = false,
   }) {
     final cs = Theme.of(context).colorScheme;
     final isSelected = _selectedChats.contains(id);
-    final isEncrypted = ChatEncryptionStore.instance.isEnabled(
+    final e2eeInfo = E2eeService.instance.info(
       _profile?.id ?? 0,
       int.tryParse(id) ?? 0,
     );
+    final isEncrypted =
+        ChatEncryptionStore.instance.isEnabled(
+          _profile?.id ?? 0,
+          int.tryParse(id) ?? 0,
+        ) ||
+        E2eeService.instance.isOn(_profile?.id ?? 0, int.tryParse(id) ?? 0);
+    final isVerified =
+        e2eeInfo?.phase == E2eePhase.established && e2eeInfo!.verified;
     final Widget? statusIcon = (ownStatus != null && draft == null)
         ? _ownStatusIcon(cs, ownStatus, ownRead)
         : null;
@@ -3087,7 +3668,15 @@ class _ChatListScreenState extends State<ChatListScreen>
               ),
               MessageDecryptionState.wrongKey => _buildPreviewLine(
                 cs,
-                'неверный ключ',
+                AppLocalizations.of(context)!.chatListPreviewWrongKey,
+                const [],
+                draft,
+                true,
+                prefix: previewPrefix,
+              ),
+              MessageDecryptionState.unavailable => _buildPreviewLine(
+                cs,
+                AppLocalizations.of(context)!.chatListPreviewUnavailable,
                 const [],
                 draft,
                 true,
@@ -3121,25 +3710,47 @@ class _ChatListScreenState extends State<ChatListScreen>
         : _storyPreviewFor(storyOwnerId);
     final avatarRadius = story == null ? 24.0 : 20.0;
 
-    final CircleAvatar rawAvatar = CircleAvatar(
-      radius: avatarRadius,
-      backgroundColor: cs.surfaceContainerHighest,
-      backgroundImage: imageUrl.isNotEmpty
-          ? CachedNetworkImageProvider(
-              imageUrl,
-              maxWidth: kAvatarThumbSize,
-              maxHeight: kAvatarThumbSize,
-            )
-          : null,
-      child: imageUrl.isEmpty
-          ? Text(
-              name.isNotEmpty ? name[0].toUpperCase() : '?',
-              style: TextStyle(
-                color: cs.onSurfaceVariant,
-                fontSize: story == null ? 20 : 17,
-              ),
-            )
-          : null,
+    // #***! id "0" это Избранное — метка-закладка вместо буквы "И"
+    final isSavedMessages = id == '0';
+    final Widget rawAvatar = LocalAvatarBuilder(
+      userId: chatType == 'DIALOG' ? presenceUserId : 0,
+      builder: (context, local) => CircleAvatar(
+        radius: avatarRadius,
+        backgroundColor: isSavedMessages
+            ? cs.primary
+            : cs.surfaceContainerHighest,
+        backgroundImage: isSavedMessages
+            ? null
+            : local != null
+            ? ResizeImage(
+                local,
+                width: kAvatarThumbSize,
+                height: kAvatarThumbSize,
+              )
+            : imageUrl.isNotEmpty
+            ? CachedNetworkImageProvider(
+                imageUrl,
+                maxWidth: kAvatarThumbSize,
+                maxHeight: kAvatarThumbSize,
+              )
+            : null,
+        child: isSavedMessages
+            ? Icon(
+                Symbols.bookmark,
+                fill: 1,
+                color: cs.onPrimary,
+                size: story == null ? 26 : 22,
+              )
+            : (imageUrl.isEmpty && local == null
+                  ? Text(
+                      name.isNotEmpty ? name[0].toUpperCase() : '?',
+                      style: TextStyle(
+                        color: cs.onSurfaceVariant,
+                        fontSize: story == null ? 20 : 17,
+                      ),
+                    )
+                  : null),
+      ),
     );
 
     final Widget avatarCircle = story == null
@@ -3166,7 +3777,7 @@ class _ChatListScreenState extends State<ChatListScreen>
       key: ValueKey('chat_$id'),
       child: InkWell(
         onTap: () {
-          if (widget.forwardMode) {
+          if (widget.forwardMode && !_forwardPicking) {
             Navigator.of(context).pop(
               ForwardTarget(
                 chatId: int.parse(id),
@@ -3177,48 +3788,19 @@ class _ChatListScreenState extends State<ChatListScreen>
             );
             return;
           }
-          if (_shareMode) {
-            _toggleShareTarget(id, name);
+          if (_shareMode || _forwardPicking) {
+            _toggleRecipient(id, name);
             return;
           }
           if (_isSelectionMode) {
             _toggleSelection(id);
             return;
           }
-          if (imageUrl.isNotEmpty) {
-            unawaited(
-              precacheImage(
-                CachedNetworkImageProvider(
-                  imageUrl,
-                  maxWidth: kAvatarThumbSize,
-                  maxHeight: kAvatarThumbSize,
-                ),
-                context,
-              ),
-            );
-          }
-          if (widget.onChatSelected != null) {
-            widget.onChatSelected!(
-              DesktopChatSelection(
-                chatId: int.parse(id),
-                name: name,
-                imageUrl: imageUrl,
-                chatType: chatType,
-              ),
-            );
-          } else {
-            pushSwipeable(
-              context,
-              (context) => ChatScreen(
-                chatId: int.parse(id),
-                name: name,
-                imageUrl: imageUrl,
-                chatType: chatType,
-              ),
-            );
-          }
+          _openChatFromList(id, name, imageUrl, chatType);
         },
-        onLongPress: (widget.forwardMode || _shareMode)
+        onLongPress: widget.forwardBatch != null
+            ? () => _toggleRecipient(id, name)
+            : (widget.forwardMode || _shareMode)
             ? null
             : () => _toggleSelection(id),
         child: AnimatedContainer(
@@ -3231,45 +3813,59 @@ class _ChatListScreenState extends State<ChatListScreen>
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    avatarCircle,
-                    if (isEncrypted)
-                      const Positioned(
-                        left: -2,
-                        bottom: -2,
-                        child: EncryptionLockBadge(size: 18),
-                      ),
-                    if (isSelected)
-                      Positioned(
-                        right: -2,
-                        bottom: -2,
-                        child: Container(
-                          width: 20,
-                          height: 20,
-                          decoration: BoxDecoration(
-                            color: cs.primary,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: cs.surface, width: 2),
-                          ),
-                          child: Icon(
-                            Symbols.check,
-                            color: cs.onPrimary,
-                            size: 14,
+                GestureDetector(
+                  onLongPress: _canPreviewChats
+                      ? () => _previewChat(id, name, imageUrl, chatType)
+                      : null,
+                  child: Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      avatarCircle,
+                      if (isEncrypted)
+                        Positioned(
+                          left: -2,
+                          bottom: -2,
+                          child: EncryptionLockBadge(
+                            size: 18,
+                            verified: isVerified,
                           ),
                         ),
-                      )
-                    else if (presenceUserId != 0)
-                      Positioned(
-                        right: 0,
-                        bottom: 0,
-                        child: OnlineDot(
-                          userId: presenceUserId,
-                          borderColor: cs.surface,
+                      if (isSelected)
+                        Positioned(
+                          right: -2,
+                          bottom: -2,
+                          child: Container(
+                            width: 20,
+                            height: 20,
+                            decoration: BoxDecoration(
+                              color: cs.primary,
+                              shape: BoxShape.circle,
+                              border: Border.all(color: cs.surface, width: 2),
+                            ),
+                            child: Icon(
+                              Symbols.check,
+                              color: cs.onPrimary,
+                              size: 14,
+                            ),
+                          ),
+                        )
+                      else if (hasCall)
+                        Positioned(
+                          right: -2,
+                          bottom: -2,
+                          child: ChatCallBadge(borderColor: cs.surface),
+                        )
+                      else if (presenceUserId != 0)
+                        Positioned(
+                          right: 0,
+                          bottom: 0,
+                          child: OnlineDot(
+                            userId: presenceUserId,
+                            borderColor: cs.surface,
+                          ),
                         ),
-                      ),
-                  ],
+                    ],
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -3409,8 +4005,9 @@ class _ChatListScreenState extends State<ChatListScreen>
 
   bool _isBotDialog(int contactId, CachedChat chat) {
     if (contactId == 0 || contactId == _profile?.id) return false;
-    if (ContactCache.getOptions(contactId)?.contains('BOT') == true)
+    if (ContactCache.getOptions(contactId)?.contains('BOT') == true) {
       return true;
+    }
     return chat.options.contains('BOT');
   }
 
@@ -3450,6 +4047,46 @@ class _ChatListScreenState extends State<ChatListScreen>
     );
   }
 
+  Future<void> _startAddAccount() async {
+    final previousId = await TokenStorage.getActiveAccountId();
+    await resetDigitalIdSession();
+    try {
+      await accountModule.beginAddAccount();
+    } catch (_) {}
+    if (!mounted) return;
+    await Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(
+        builder: (_) => LoginScreen(returnToAccountId: previousId),
+      ),
+      (route) => false,
+    );
+  }
+
+  Future<void> _resolveLostAccount(int accountId) async {
+    final profile = await AppDatabase.loadProfile(accountId);
+    if (!mounted) return;
+    final l10n = AppLocalizations.of(context)!;
+    final name = profile == null
+        ? l10n.contactIdFallback('$accountId')
+        : [
+            profile.firstName,
+            profile.lastName ?? '',
+          ].where((part) => part.isNotEmpty).join(' ');
+    final choice = await showLostAccountDialog(context, name: name);
+    if (!mounted) return;
+    switch (choice) {
+      case LostAccountChoice.signIn:
+        await _startAddAccount();
+      case LostAccountChoice.remove:
+        await accountModule.removeAccount(accountId);
+        if (mounted) {
+          showCustomNotification(context, l10n.accountSessionLostRemoved);
+        }
+      case null:
+        return;
+    }
+  }
+
   void _openAccountSwitcher(Offset point) {
     Haptics.medium();
     final controller = AccountSwitcherController()..attach(point);
@@ -3461,26 +4098,26 @@ class _ChatListScreenState extends State<ChatListScreen>
         controller.dispose();
         if (!mounted) return;
         if (accountId == null) {
-          final previousId = await TokenStorage.getActiveAccountId();
-          await resetDigitalIdSession();
-          try {
-            await accountModule.beginAddAccount();
-          } catch (_) {}
-          if (!mounted) return;
-          await Navigator.of(context).pushAndRemoveUntil(
-            MaterialPageRoute(
-              builder: (_) => LoginScreen(returnToAccountId: previousId),
-            ),
-            (route) => false,
-          );
+          await _startAddAccount();
+          return;
+        }
+        if (!await accountModule.hasStoredSession(accountId)) {
+          await _resolveLostAccount(accountId);
           return;
         }
         await resetDigitalIdSession();
         try {
           await accountModule.switchAccount(accountId);
+        } on AccountSessionLostException {
+          await _resolveLostAccount(accountId);
+          return;
         } catch (e) {
+          logger.w('Переключение на аккаунт $accountId не удалось: $e');
           if (!mounted) return;
-          showCustomNotification(context, 'Не удалось переключить аккаунт');
+          showCustomNotification(
+            context,
+            AppLocalizations.of(context)!.accountSwitchFailed,
+          );
           return;
         }
         if (!mounted) return;
@@ -3493,13 +4130,23 @@ class _ChatListScreenState extends State<ChatListScreen>
   }
 
   Widget _buildFabMenu() {
+    final l10n = AppLocalizations.of(context)!;
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
         _buildFabMenuItem(
+          Symbols.edit_square,
+          l10n.chatListMessagePerson,
+          onTap: () {
+            _toggleFab();
+            unawaited(_messagePerson());
+          },
+        ),
+        const SizedBox(height: 4),
+        _buildFabMenuItem(
           Symbols.group_add,
-          'Создать группу',
+          l10n.chatListCreateGroup,
           onTap: () {
             _toggleFab();
             showCreateGroupFlow(context);
@@ -3508,7 +4155,7 @@ class _ChatListScreenState extends State<ChatListScreen>
         const SizedBox(height: 4),
         _buildFabMenuItem(
           Symbols.campaign,
-          'Создать канал',
+          l10n.chatListCreateChannel,
           onTap: () {
             _toggleFab();
             showCreateChannelFlow(context);
@@ -3517,7 +4164,7 @@ class _ChatListScreenState extends State<ChatListScreen>
         const SizedBox(height: 4),
         _buildFabMenuItem(
           Symbols.person_add,
-          'Создать контакт',
+          l10n.chatListCreateContact,
           onTap: () {
             _toggleFab();
             showAddContactSheet(context);
@@ -3526,13 +4173,28 @@ class _ChatListScreenState extends State<ChatListScreen>
         const SizedBox(height: 4),
         _buildFabMenuItem(
           Symbols.create_new_folder,
-          'Создать папку',
+          l10n.chatListCreateFolder,
           onTap: () {
             _toggleFab();
             showFolderEditSheet(context);
           },
         ),
       ],
+    );
+  }
+
+  Future<void> _messagePerson() async {
+    final found = await showFindUserSheet(
+      context,
+      title: AppLocalizations.of(context)!.chatListMessagePerson,
+      actionLabel: AppLocalizations.of(context)!.chatListMessageAction,
+    );
+    if (found == null || !mounted) return;
+    _openChatFromList(
+      found.chatId.toString(),
+      found.name,
+      found.avatarUrl,
+      'DIALOG',
     );
   }
 
@@ -3607,7 +4269,9 @@ class _ChatListScreenState extends State<ChatListScreen>
       chatId: chatId,
       name:
           chat?.title ??
-          (record.sourceName.trim().isEmpty ? 'Чат' : record.sourceName.trim()),
+          (record.sourceName.trim().isEmpty
+              ? AppLocalizations.of(context)!.hubChatTileTitle
+              : record.sourceName.trim()),
       imageUrl: chat?.iconUrl ?? '',
       chatType: chat?.type ?? 'CHAT',
       initialMessageId: messageId,
@@ -3641,11 +4305,12 @@ class _ChatListScreenState extends State<ChatListScreen>
         break;
       }
     }
+    final name = AppLocalizations.of(context)!.chatListSavedMessages;
     pushSwipeable(
       context,
       (_) => ChatScreen(
         chatId: 0,
-        name: 'Избранное',
+        name: name,
         imageUrl: self?.iconUrl ?? '',
         chatType: self?.type ?? 'DIALOG',
       ),
@@ -3665,7 +4330,12 @@ class _ChatListScreenState extends State<ChatListScreen>
         .where((c) => !CloudStorageModule.isCloudStorageGroup(c))
         .toList();
     if (targets.isEmpty) {
-      if (mounted) showCustomNotification(context, 'Непрочитанных чатов нет');
+      if (mounted) {
+        showCustomNotification(
+          context,
+          AppLocalizations.of(context)!.chatListNoUnreadChats,
+        );
+      }
       return;
     }
     for (final c in targets) {
@@ -3678,7 +4348,10 @@ class _ChatListScreenState extends State<ChatListScreen>
       );
     }
     if (mounted) {
-      showCustomNotification(context, 'Все чаты отмечены прочитанными');
+      showCustomNotification(
+        context,
+        AppLocalizations.of(context)!.chatListAllMarkedRead,
+      );
     }
   }
 
@@ -3715,4 +4388,55 @@ class _StoriesUi extends ChangeNotifier {
   bool shouldCollapseSearch = false;
 
   void notify() => notifyListeners();
+}
+
+class _LockNowButton extends StatefulWidget {
+  const _LockNowButton();
+
+  @override
+  State<_LockNowButton> createState() => _LockNowButtonState();
+}
+
+class _LockNowButtonState extends State<_LockNowButton> {
+  final GlobalKey _glyphKey = GlobalKey();
+
+  void _lock() {
+    final box = _glyphKey.currentContext?.findRenderObject();
+    final origin = box is RenderBox && box.hasSize
+        ? box.localToGlobal(Offset.zero) & box.size
+        : null;
+    Haptics.medium();
+    AppLock.instance.lock(origin: origin);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final lock = AppLock.instance;
+    return ValueListenableBuilder<bool>(
+      valueListenable: lock.enabled,
+      builder: (context, enabled, _) {
+        if (!enabled) return const SizedBox.shrink();
+        return IconButton(
+          tooltip: AppLocalizations.of(context)!.lockNow,
+          onPressed: _lock,
+          icon: ValueListenableBuilder<bool>(
+            valueListenable: lock.locked,
+            builder: (context, locked, child) => AnimatedOpacity(
+              opacity: locked ? 0 : 1,
+              duration: const Duration(milliseconds: 180),
+              child: child,
+            ),
+            child: LockGlyph(
+              key: _glyphKey,
+              closed: 0,
+              size: 24,
+              color: cs.outline,
+              holeColor: cs.surface,
+            ),
+          ),
+        );
+      },
+    );
+  }
 }

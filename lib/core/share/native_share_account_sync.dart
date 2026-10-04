@@ -9,12 +9,14 @@ import '../../backend/modules/chats.dart';
 import '../../backend/modules/contacts.dart';
 import '../../backend/modules/messages.dart';
 import '../config/komet_settings.dart';
+import '../crypto/e2ee_service.dart';
 import '../storage/app_database.dart';
 import '../storage/chat_encryption_store.dart';
 import '../storage/token_storage.dart';
 import '../utils/logger.dart';
 import 'native_share_account_channel.dart';
 import 'share_account_snapshot.dart';
+import 'share_recipient_eligibility.dart';
 
 class NativeShareAccountSync with WidgetsBindingObserver {
   NativeShareAccountSync._();
@@ -39,6 +41,7 @@ class NativeShareAccountSync with WidgetsBindingObserver {
     chats.chatsChanged.addListener(_schedule);
     ContactsModule.revision.addListener(_schedule);
     ChatEncryptionStore.instance.revision.addListener(_refreshPrivacy);
+    E2eeService.instance.revision.addListener(_refreshPrivacy);
     KometSettings.ghostMode.addListener(_schedule);
     WidgetsBinding.instance.addObserver(this);
     unawaited(refresh());
@@ -102,7 +105,9 @@ class NativeShareAccountSync with WidgetsBindingObserver {
     final profile = await AppDatabase.loadProfile(accountId);
     if (token == null || profile == null) return;
     await ChatEncryptionStore.instance.load();
+    await E2eeService.instance.ensureLoaded(accountId);
     final privacyRevision = ChatEncryptionStore.instance.revision.value;
+    final e2eeRevision = E2eeService.instance.revision.value;
     final cachedChats = await chats.getChats(accountId);
     if (await TokenStorage.getActiveAccountId() != accountId ||
         api.sessionEpoch != epoch ||
@@ -112,7 +117,9 @@ class NativeShareAccountSync with WidgetsBindingObserver {
         !identical(_account, account)) {
       return;
     }
-    if (privacyRevision != ChatEncryptionStore.instance.revision.value) {
+    if (privacyRevision != ChatEncryptionStore.instance.revision.value ||
+        e2eeRevision != E2eeService.instance.revision.value ||
+        !E2eeService.instance.isLoaded(accountId)) {
       _refreshRequested = true;
       return;
     }
@@ -129,12 +136,15 @@ class NativeShareAccountSync with WidgetsBindingObserver {
           }
         }
       }
-      String? disabledReason;
-      if (ChatEncryptionStore.instance.isEnabled(accountId, chat.id)) {
-        disabledReason = 'Зашифрованный чат — отправляйте из Komet';
-      } else if (chat.type == 'CHANNEL' && !chat.iAmAdmin(accountId)) {
-        disabledReason = 'Нет права отправлять сообщения в этот канал';
-      }
+      final disabledReason = shareRecipientDisabledReason(
+        legacyEncryptionEnabled: ChatEncryptionStore.instance.isEnabled(
+          accountId,
+          chat.id,
+        ),
+        e2eePhase: E2eeService.instance.phaseOf(accountId, chat.id),
+        isChannel: chat.type == 'CHANNEL',
+        canPostToChannel: chat.iAmAdmin(accountId),
+      );
       recipients.add(
         ShareRecipientSnapshot(
           id: chat.id,
@@ -169,6 +179,7 @@ class NativeShareAccountSync with WidgetsBindingObserver {
     _chats?.chatsChanged.removeListener(_schedule);
     ContactsModule.revision.removeListener(_schedule);
     ChatEncryptionStore.instance.revision.removeListener(_refreshPrivacy);
+    E2eeService.instance.revision.removeListener(_refreshPrivacy);
     KometSettings.ghostMode.removeListener(_schedule);
     WidgetsBinding.instance.removeObserver(this);
     _api = null;

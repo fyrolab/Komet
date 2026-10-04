@@ -38,6 +38,30 @@ pub struct SessionOptions {
     pub proxy: Option<String>,
     pub is_pwa: Option<bool>,
     pub header_user_agent: Option<String>,
+    pub fingerprint_digests: Option<FingerprintDigests>,
+}
+
+#[derive(Deserialize)]
+pub struct FingerprintDigests {
+    signature: String,
+    dex: String,
+    so: String,
+}
+
+impl FingerprintDigests {
+    fn decode(&self) -> Result<[Vec<u8>; 3], String> {
+        let decode = |value: &str| {
+            hex::decode(value)
+                .ok()
+                .filter(|bytes| !bytes.is_empty() && bytes.len() <= 64)
+                .ok_or_else(|| "Обновите данные аккаунта в приложении Komet".to_string())
+        };
+        Ok([
+            decode(&self.signature)?,
+            decode(&self.dex)?,
+            decode(&self.so)?,
+        ])
+    }
 }
 
 pub struct Connection {
@@ -150,6 +174,9 @@ impl Connection {
 }
 
 fn fresh_session_id(input: &Input) -> i64 {
+    if input.session.client_session_id == 0 {
+        return 0;
+    }
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
     let time = SystemTime::now()
@@ -178,14 +205,8 @@ fn login_payload(input: &Input, seed: Option<i64>) -> Result<Value, String> {
     let mut payload = input.login.as_object().cloned().unwrap_or_default();
     payload.insert("token".into(), json!(input.token));
     payload.remove("chatCacheFingerprint");
-    if let Some(seed) = seed {
-        let signature =
-            hex::decode("1684414033eb263e2c615f8b7df5ed8793850a07656304997fbf07e9e21e1e93")
-                .unwrap();
-        let dex = hex::decode("38cff46f392dc1734c308be011c2f0d8da152a390b41063dbb2c913e3032f4b3")
-            .unwrap();
-        let so = hex::decode("634ecc42b246784d975f180b4fecf903df235cdf0476da47163a85630eb1a6a8")
-            .unwrap();
+    if let (Some(seed), Some(digests)) = (seed, &input.session.fingerprint_digests) {
+        let [signature, dex, so] = digests.decode()?;
         let fingerprint = kolibri_net::auth::chat_cache_fingerprint(
             &signature,
             &dex,
@@ -460,6 +481,48 @@ mod tests {
         assert_eq!(payload["token"], input.token);
         assert_eq!(payload["exp"], input.login["exp"]);
         assert_eq!(payload["interactive"], input.session.ping_interactive);
+    }
+
+    #[test]
+    fn exported_host_digests_match_all_architecture_and_prelogin_vectors() {
+        let vectors: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../test/fixtures/share_fingerprint_vectors.json"
+        ))
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut input = crate::engine::tests::input(directory.path(), vec![]);
+        for vector in vectors {
+            input.session.fingerprint_digests =
+                Some(serde_json::from_value(vector["digests"].clone()).unwrap());
+            input.session.device_id = vector["device_id"].as_str().unwrap().into();
+            let payload = login_payload(&input, vector["seed"].as_i64()).unwrap();
+            let wire = kolibri_net::protocol::json_to_value(&payload["chatCacheFingerprint"]);
+            let rmpv::Value::Binary(bytes) = wire else {
+                panic!("fingerprint must remain binary");
+            };
+            assert_eq!(hex::encode(bytes), vector["fingerprint"].as_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn web_options_omit_native_fingerprint_and_session_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut input = crate::engine::tests::input(directory.path(), vec![]);
+        input.session.fingerprint_digests = None;
+        input.session.client_session_id = 0;
+        assert!(login_payload(&input, Some(101))
+            .unwrap()
+            .get("chatCacheFingerprint")
+            .is_none());
+        assert_eq!(fresh_session_id(&input), 0);
+    }
+
+    #[test]
+    fn invalid_exported_digest_prevents_invalid_login_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut input = crate::engine::tests::input(directory.path(), vec![]);
+        input.session.fingerprint_digests.as_mut().unwrap().dex = "invalid-hex".into();
+        assert!(login_payload(&input, Some(101)).is_err());
     }
 
     #[test]

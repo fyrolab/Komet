@@ -45,6 +45,7 @@ final class KometStreamHandler: NSObject, FlutterStreamHandler {
       registerNotifications(messenger)
       registerScreen(messenger)
       registerShare(messenger)
+      registerClipboard(messenger)
     }
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
@@ -151,6 +152,7 @@ final class KometStreamHandler: NSObject, FlutterStreamHandler {
         self.videoNote = recorder
         recorder.initialize(
           front: (args["front"] as? NSNumber)?.boolValue ?? true,
+          cameraId: args["cameraId"] as? String,
           edge: (args["size"] as? NSNumber)?.intValue ?? 480,
           fps: (args["fps"] as? NSNumber)?.intValue ?? 30,
           result: result)
@@ -194,6 +196,12 @@ final class KometStreamHandler: NSObject, FlutterStreamHandler {
       default:
         result(FlutterMethodNotImplemented)
       }
+    }
+  }
+
+  private func registerClipboard(_ messenger: FlutterBinaryMessenger) {
+    method("ru.komet.app/clipboard", messenger) { call, result in
+      KometClipboard.handle(call, result: result)
     }
   }
 

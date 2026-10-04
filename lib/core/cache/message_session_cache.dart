@@ -2,6 +2,7 @@ import 'dart:collection';
 
 import '../../backend/modules/messages.dart';
 
+// #***! сообщения чата плюс докрутили ли до начала
 class CachedChatMessages {
   final List<CachedMessage> messages;
   final bool reachedStart;
@@ -9,14 +10,17 @@ class CachedChatMessages {
   const CachedChatMessages(this.messages, this.reachedStart);
 }
 
+// #***! 24 последних чата в памяти чтоб открывались мгновенно
 class MessageSessionCache {
   static const int _capacity = 24;
 
+  // #***! LinkedHashMap помнит порядок, на нём LRU
   static final LinkedHashMap<String, CachedChatMessages> _store =
       LinkedHashMap<String, CachedChatMessages>();
 
   static String _key(int accountId, int chatId) => '$accountId:$chatId';
 
+  // #***! чтение двигает чат в конец очереди
   static CachedChatMessages? get(int accountId, int chatId) {
     final key = _key(accountId, chatId);
     final entry = _store.remove(key);
@@ -38,9 +42,39 @@ class MessageSessionCache {
       List<CachedMessage>.of(messages),
       reachedStart,
     );
+    // #***! переполнились, выкидываем старое
     while (_store.length > _capacity) {
       _store.remove(_store.keys.first);
     }
+  }
+
+  static void replace(
+    int accountId,
+    int chatId,
+    String messageId,
+    CachedMessage Function(CachedMessage current) change,
+  ) {
+    final cached = get(accountId, chatId);
+    if (cached == null) return;
+    final list = List<CachedMessage>.of(cached.messages);
+    final idx = list.indexWhere((m) => m.id == messageId);
+    if (idx == -1) return;
+    list[idx] = change(list[idx]);
+    save(accountId, chatId, list, reachedStart: cached.reachedStart);
+  }
+
+  static void append(int accountId, int chatId, List<CachedMessage> added) {
+    final cached = _store[_key(accountId, chatId)];
+    if (cached == null) return;
+    final known = {for (final message in cached.messages) message.id};
+    final fresh = [
+      for (final message in added)
+        if (!known.contains(message.id)) message,
+    ];
+    if (fresh.isEmpty) return;
+    final merged = [...cached.messages, ...fresh]
+      ..sort((a, b) => a.time.compareTo(b.time));
+    save(accountId, chatId, merged, reachedStart: cached.reachedStart);
   }
 
   static void remove(int accountId, int chatId) =>
